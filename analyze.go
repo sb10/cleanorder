@@ -62,6 +62,24 @@ func newAnalysisResult(fset *token.FileSet, src []byte, file *ast.File) *analysi
 	}
 }
 
+// analyzeFile parses filename and computes metadata required for reordering.
+func analyzeFile(filename string, src []byte) (*analysisResult, error) {
+	fset := token.NewFileSet()
+
+	file, err := parser.ParseFile(fset, filename, src, parser.ParseComments)
+	if err != nil {
+		return nil, err
+	}
+
+	res := newAnalysisResult(fset, src, file)
+
+	res.collectDecls(fset, file)
+	res.buildCallGraph()
+	res.classify()
+
+	return res, nil
+}
+
 // collectDecls scans file.Decls and populates basic declaration information.
 //
 //nolint:gocognit
@@ -397,9 +415,6 @@ func (res *analysisResult) findConstructors(typeSet map[string]struct{}) {
 	}
 }
 
-// (previous helper isConstructorLikeName removed: constructor detection now
-// purely return-type based)
-
 func resolveResultTypeToIdent(t ast.Expr) string {
 	for {
 		switch tt := t.(type) {
@@ -599,22 +614,4 @@ func (res *analysisResult) isIndependentCandidate(fb funcBlock, ctorSet, userSet
 	}
 
 	return true
-}
-
-// analyzeFile parses filename and computes metadata required for reordering.
-func analyzeFile(filename string, src []byte) (*analysisResult, error) {
-	fset := token.NewFileSet()
-
-	file, err := parser.ParseFile(fset, filename, src, parser.ParseComments)
-	if err != nil {
-		return nil, err
-	}
-
-	res := newAnalysisResult(fset, src, file)
-
-	res.collectDecls(fset, file)
-	res.buildCallGraph()
-	res.classify()
-
-	return res, nil
 }
