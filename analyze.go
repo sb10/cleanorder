@@ -6,7 +6,6 @@ import (
 	"go/token"
 	"sort"
 	"strings"
-	"unicode"
 )
 
 // callFirstPosMap shortens the map type used to record first call positions.
@@ -95,6 +94,23 @@ func (res *analysisResult) handleGenDecl(fset *token.FileSet, gd *ast.GenDecl, s
 		s = fset.Position(gd.Doc.Pos()).Offset
 	}
 
+	// Extend end to include trailing inline comments that fall within the
+	// lines spanned by the declaration to preserve trailing //nolint comments.
+	declStartLine := fset.Position(gd.Pos()).Line
+	declEndLine := fset.Position(gd.End()).Line
+	for _, cgroup := range res.file.Comments {
+		for _, c := range cgroup.List {
+			cline := fset.Position(c.Pos()).Line
+			if cline < declStartLine || cline > declEndLine {
+				continue
+			}
+			ce := fset.Position(c.End()).Offset
+			if ce > e {
+				e = ce
+			}
+		}
+	}
+
 	switch gd.Tok {
 	case token.IMPORT:
 		if e > res.lastImportEnd {
@@ -126,7 +142,11 @@ func (res *analysisResult) handleFuncDecl(fset *token.FileSet, fd *ast.FuncDecl)
 	}
 
 	recv := getRecvType(fd)
-	fb := funcBlock{key: fd.Name.Name, start: fs, end: fe, recvType: recv, isMethod: recv != ""}
+	key := fd.Name.Name
+	if recv != "" { // qualify method key to avoid collisions between different receiver types with same method name
+		key = recv + "." + key
+	}
+	fb := funcBlock{key: key, start: fs, end: fe, recvType: recv, isMethod: recv != ""}
 	res.funcBlocks = append(res.funcBlocks, fb)
 	res.funcByKey[fb.key] = fb
 }
@@ -134,9 +154,23 @@ func (res *analysisResult) handleFuncDecl(fset *token.FileSet, fd *ast.FuncDecl)
 // buildCallGraph inspects function bodies to build adjacency and call sequence
 // info.
 func (res *analysisResult) buildCallGraph() {
-	nameToKey := map[string]string{}
+	// map simple names to unique keys only when not ambiguous to avoid
+	// accidental collisions across different receiver types.
+	temp := map[string][]string{}
 	for _, fb := range res.funcBlocks {
-		nameToKey[fb.key] = fb.key
+		simple := fb.key
+		if fb.isMethod { // strip receiver qualifier
+			if idx := strings.LastIndex(simple, "."); idx != -1 {
+				simple = simple[idx+1:]
+			}
+		}
+		temp[simple] = append(temp[simple], fb.key)
+	}
+	nameToKey := map[string]string{}
+	for n, list := range temp {
+		if len(list) == 1 {
+			nameToKey[n] = list[0]
+		}
 	}
 
 	callFirstPos := callFirstPosMap{}
@@ -160,25 +194,33 @@ func (res *analysisResult) processFuncCalls(
 	callFirstPos callFirstPosMap,
 	nameToKey map[string]string,
 ) {
-	caller := fd.Name.Name
-	if _, ok := callFirstPos[caller]; !ok {
-		callFirstPos[caller] = map[string]int{}
+	// Use the same key scheme as funcBlocks (receiver-qualified for methods)
+	callerKey := fd.Name.Name
+	if fd.Recv != nil {
+		if rt := getRecvType(fd); rt != "" {
+			callerKey = rt + "." + callerKey
+		}
 	}
 
-	res.collectCallPositions(fd, callFirstPos, nameToKey)
+	if _, ok := callFirstPos[callerKey]; !ok {
+		callFirstPos[callerKey] = map[string]int{}
+	}
 
-	if seq := res.buildSeqForCaller(caller, callFirstPos); len(seq) > 0 {
-		res.callSeq[caller] = seq
+	res.collectCallPositions(fd, callerKey, callFirstPos, nameToKey)
+
+	if seq := res.buildSeqForCaller(callerKey, callFirstPos); len(seq) > 0 {
+		res.callSeq[callerKey] = seq
 	}
 }
 
 //nolint:funlen,gocognit
+
 func (res *analysisResult) collectCallPositions(
 	fd *ast.FuncDecl,
+	callerKey string,
 	callFirstPos callFirstPosMap,
 	nameToKey map[string]string,
 ) {
-	caller := fd.Name.Name
 	ast.Inspect(fd.Body, func(n ast.Node) bool {
 		ce, ok := n.(*ast.CallExpr)
 		if !ok {
@@ -191,18 +233,18 @@ func (res *analysisResult) collectCallPositions(
 		}
 
 		callee, ok := nameToKey[name]
-		if !ok || callee == caller {
+		if !ok || callee == callerKey {
 			return true
 		}
 
-		res.adj[caller][callee] = struct{}{}
+		res.adj[callerKey][callee] = struct{}{}
 		if _, ok := res.callersOf[callee]; !ok {
 			res.callersOf[callee] = map[string]struct{}{}
 		}
 
-		res.callersOf[callee][caller] = struct{}{}
-		if _, seen := callFirstPos[caller][callee]; !seen {
-			callFirstPos[caller][callee] = res.fset.Position(ce.Pos()).Offset
+		res.callersOf[callee][callerKey] = struct{}{}
+		if _, seen := callFirstPos[callerKey][callee]; !seen {
+			callFirstPos[callerKey][callee] = res.fset.Position(ce.Pos()).Offset
 		}
 
 		return true
@@ -282,9 +324,6 @@ func (res *analysisResult) findConstructors(typeSet map[string]struct{}) {
 		}
 
 		name := fd.Name.Name
-		if !isConstructorLikeName(name) {
-			continue
-		}
 
 		if fd.Type.Results == nil {
 			continue
@@ -297,6 +336,8 @@ func (res *analysisResult) findConstructors(typeSet map[string]struct{}) {
 			}
 
 			if _, ok := typeSet[tn]; ok {
+				// treat any such function as constructor-like; we still keep
+				// original ordering among constructors.
 				res.constructors[tn] = append(res.constructors[tn], name)
 			}
 		}
@@ -309,21 +350,10 @@ func (res *analysisResult) findConstructors(typeSet map[string]struct{}) {
 // lowercase form (e.g. newEmitter) that returns the type; we extend detection
 // to accept that pattern so that such helper constructors are clustered
 // immediately after their type.
-func isConstructorLikeName(name string) bool {
-	if strings.HasPrefix(name, "New") {
-		return true
-	}
-
-	if strings.HasPrefix(name, "new") && len(name) > len("new") {
-		// ensure the following rune starts an identifier (avoid matching just "new")
-		r := []rune(name[len("new"):])[0]
-		if unicode.IsLetter(r) || r == '_' {
-			return true
-		}
-	}
-
-	return false
-}
+// isConstructorLikeName retained for potential future use; now any free
+// function returning the type is considered a constructor. Kept to avoid
+// removing previously used symbol.
+func isConstructorLikeName(name string) bool { return strings.HasPrefix(name, "New") }
 
 func resolveResultTypeToIdent(t ast.Expr) string {
 	for {
@@ -349,7 +379,10 @@ func (res *analysisResult) findMethods(typeSet map[string]struct{}) {
 
 		rt := getRecvType(fd)
 		if _, ok := typeSet[rt]; ok {
-			res.methods[rt] = append(res.methods[rt], fd.Name.Name)
+			// build qualified key same way as handleFuncDecl
+			name := fd.Name.Name
+			q := rt + "." + name
+			res.methods[rt] = append(res.methods[rt], q)
 		}
 	}
 }
@@ -381,7 +414,11 @@ func (res *analysisResult) computeUsers(typeSet map[string]struct{}) {
 
 	for tn, list := range res.methods {
 		for _, m := range list {
-			methodSet[m] = tn
+			name := m
+			if idx := strings.LastIndex(name, "."); idx != -1 {
+				name = name[idx+1:]
+			}
+			methodSet[name] = tn
 		}
 	}
 

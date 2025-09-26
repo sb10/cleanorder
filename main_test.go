@@ -695,6 +695,70 @@ func newWidget() *widget { return &widget{} }
 			t.Fatalf("constructor must appear before user of the type: %v", order)
 		}
 	})
+
+	t.Run("summary_file_behaviour", func(t *testing.T) {
+		// Reproduce issues from summariser.go example.
+		src := `package summary
+
+import (
+  "bytes"
+  "strings"
+)
+
+var slash = []byte{'/'} //nolint:gochecknoglobals
+
+type DirectoryPath struct { Name string; Parent *DirectoryPath }
+
+// factory-like function returning *DirectoryPath but not named New
+func directoryPathFrom(name string, parent *DirectoryPath) *DirectoryPath { return &DirectoryPath{Name:name, Parent:parent} }
+
+type FileInfo struct { Name string }
+
+// returns FileInfo but name not New
+func fileInfoFromStatsInfo(n string) FileInfo { return FileInfo{Name:n} }
+
+type directory []int
+
+func (d directory) Add(fi *FileInfo) {}
+func (d directory) Output() {}
+
+type directories []directory
+
+func (d directories) Add(fi *FileInfo) {}
+func (d directories) Output() {}
+
+// unrelated free function
+func Z() { _ = bytes.Compare([]byte("a"), []byte("b")); _ = strings.Compare("a","b") }
+`
+
+		f := writeTempFile(t, "summary.go", src)
+		out := runTool(t, f)
+		order := declOrder(t, out)
+		outStr := string(out)
+
+		// Issue 1: inline nolint comment preserved
+		if !strings.Contains(outStr, "//nolint:gochecknoglobals") {
+			t.Fatalf("inline nolint comment removed. Output:\n%s", outStr)
+		}
+
+		// Issue 2: type FileInfo should appear before factory function fileInfoFromStatsInfo
+		fileInfoIdx := findIndex(order, "type FileInfo")
+		factoryIdx := findIndex(order, "func fileInfoFromStatsInfo")
+		if fileInfoIdx == -1 || factoryIdx == -1 {
+			t.Fatalf("missing FileInfo type or factory function: %v", order)
+		}
+		if !(fileInfoIdx < factoryIdx) {
+			t.Fatalf("FileInfo type should precede its factory function: %v", order)
+		}
+
+		// Issue 3: methods for both directory and directories present
+		need := []string{"method directory.Add", "method directory.Output", "method directories.Add", "method directories.Output"}
+		for _, n := range need {
+			if findIndex(order, n) == -1 {
+				t.Fatalf("missing method %s in output order: %v", n, order)
+			}
+		}
+	})
 }
 
 func TestNoChangeWhenAlreadyOrdered_NoExtraBlankLines(t *testing.T) {
