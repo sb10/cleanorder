@@ -88,29 +88,51 @@ func (res *analysisResult) collectDecls(fset *token.FileSet, file *ast.File) {
 	}
 }
 
-//nolint:gocyclo
 func (res *analysisResult) handleGenDecl(fset *token.FileSet, gd *ast.GenDecl, s, e int) {
+	s = res.adjustDeclStartForDoc(fset, gd, s)
+	e = res.extendEndForInlineComments(fset, gd, e)
+	res.recordGenDecl(gd, s, e)
+}
+
+func (res *analysisResult) adjustDeclStartForDoc(fset *token.FileSet, gd *ast.GenDecl, s int) int {
 	if gd.Doc != nil {
-		s = fset.Position(gd.Doc.Pos()).Offset
+		return fset.Position(gd.Doc.Pos()).Offset
 	}
 
-	// Extend end to include trailing inline comments that fall within the
-	// lines spanned by the declaration to preserve trailing //nolint comments.
-	declStartLine := fset.Position(gd.Pos()).Line
-	declEndLine := fset.Position(gd.End()).Line
-	for _, cgroup := range res.file.Comments {
-		for _, c := range cgroup.List {
-			cline := fset.Position(c.Pos()).Line
-			if cline < declStartLine || cline > declEndLine {
-				continue
-			}
-			ce := fset.Position(c.End()).Offset
-			if ce > e {
-				e = ce
+	return s
+}
+
+func (res *analysisResult) extendEndForInlineComments(fset *token.FileSet, gd *ast.GenDecl, e int) int {
+	start := fset.Position(gd.Pos()).Line
+	end := fset.Position(gd.End()).Line
+
+	for _, cg := range res.file.Comments {
+		for _, c := range cg.List {
+			if res.commentLineWithin(fset, c, start, end) {
+				e = res.extendEndForComment(fset, c, e)
 			}
 		}
 	}
 
+	return e
+}
+
+func (res *analysisResult) commentLineWithin(fset *token.FileSet, c *ast.Comment, start, end int) bool {
+	line := fset.Position(c.Pos()).Line
+
+	return line >= start && line <= end
+}
+
+func (res *analysisResult) extendEndForComment(fset *token.FileSet, c *ast.Comment, cur int) int {
+	ce := fset.Position(c.End()).Offset
+	if ce > cur {
+		return ce
+	}
+
+	return cur
+}
+
+func (res *analysisResult) recordGenDecl(gd *ast.GenDecl, s, e int) {
 	switch gd.Tok {
 	case token.IMPORT:
 		if e > res.lastImportEnd {
@@ -129,7 +151,6 @@ func (res *analysisResult) handleGenDecl(fset *token.FileSet, gd *ast.GenDecl, s
 			}
 		}
 	default:
-		// ignore other token kinds
 	}
 }
 
@@ -142,10 +163,12 @@ func (res *analysisResult) handleFuncDecl(fset *token.FileSet, fd *ast.FuncDecl)
 	}
 
 	recv := getRecvType(fd)
+
 	key := fd.Name.Name
 	if recv != "" { // qualify method key to avoid collisions between different receiver types with same method name
 		key = recv + "." + key
 	}
+
 	fb := funcBlock{key: key, start: fs, end: fe, recvType: recv, isMethod: recv != ""}
 	res.funcBlocks = append(res.funcBlocks, fb)
 	res.funcByKey[fb.key] = fb
@@ -154,31 +177,46 @@ func (res *analysisResult) handleFuncDecl(fset *token.FileSet, fd *ast.FuncDecl)
 // buildCallGraph inspects function bodies to build adjacency and call sequence
 // info.
 func (res *analysisResult) buildCallGraph() {
-	// map simple names to unique keys only when not ambiguous to avoid
-	// accidental collisions across different receiver types.
+	nameToKey := res.buildSimpleNameIndex()
+	callFirstPos := callFirstPosMap{}
+
+	res.initAdjacency()
+
+	res.walkFuncsCollectCalls(callFirstPos, nameToKey)
+}
+
+func (res *analysisResult) buildSimpleNameIndex() map[string]string {
 	temp := map[string][]string{}
+
 	for _, fb := range res.funcBlocks {
 		simple := fb.key
-		if fb.isMethod { // strip receiver qualifier
+		if fb.isMethod {
 			if idx := strings.LastIndex(simple, "."); idx != -1 {
 				simple = simple[idx+1:]
 			}
 		}
+
 		temp[simple] = append(temp[simple], fb.key)
 	}
+
 	nameToKey := map[string]string{}
+
 	for n, list := range temp {
 		if len(list) == 1 {
 			nameToKey[n] = list[0]
 		}
 	}
 
-	callFirstPos := callFirstPosMap{}
+	return nameToKey
+}
 
+func (res *analysisResult) initAdjacency() {
 	for _, fb := range res.funcBlocks {
 		res.adj[fb.key] = map[string]struct{}{}
 	}
+}
 
+func (res *analysisResult) walkFuncsCollectCalls(callFirstPos callFirstPosMap, nameToKey map[string]string) {
 	for _, decl := range res.file.Decls {
 		fd, ok := decl.(*ast.FuncDecl)
 		if !ok || fd.Body == nil {
@@ -213,42 +251,57 @@ func (res *analysisResult) processFuncCalls(
 	}
 }
 
-//nolint:funlen,gocognit
-
 func (res *analysisResult) collectCallPositions(
 	fd *ast.FuncDecl,
 	callerKey string,
 	callFirstPos callFirstPosMap,
 	nameToKey map[string]string,
 ) {
-	ast.Inspect(fd.Body, func(n ast.Node) bool {
-		ce, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
+	ast.Inspect(fd.Body, func(n ast.Node) bool { return res.inspectCallExpr(n, callerKey, callFirstPos, nameToKey) })
+}
 
-		name := callNameFromExpr(ce.Fun)
-		if name == "" {
-			return true
-		}
-
-		callee, ok := nameToKey[name]
-		if !ok || callee == callerKey {
-			return true
-		}
-
-		res.adj[callerKey][callee] = struct{}{}
-		if _, ok := res.callersOf[callee]; !ok {
-			res.callersOf[callee] = map[string]struct{}{}
-		}
-
-		res.callersOf[callee][callerKey] = struct{}{}
-		if _, seen := callFirstPos[callerKey][callee]; !seen {
-			callFirstPos[callerKey][callee] = res.fset.Position(ce.Pos()).Offset
-		}
-
+func (res *analysisResult) inspectCallExpr(
+	n ast.Node,
+	callerKey string,
+	callFirstPos callFirstPosMap,
+	nameToKey map[string]string,
+) bool {
+	ce, ok := n.(*ast.CallExpr)
+	if !ok {
 		return true
-	})
+	}
+
+	res.recordCall(ce, callerKey, callFirstPos, nameToKey)
+
+	return true
+}
+
+// recordCall updates adjacency & caller metadata for a call expression.
+func (res *analysisResult) recordCall(
+	ce *ast.CallExpr,
+	callerKey string,
+	callFirstPos callFirstPosMap,
+	nameToKey map[string]string,
+) {
+	name := callNameFromExpr(ce.Fun)
+	if name == "" {
+		return
+	}
+
+	callee, ok := nameToKey[name]
+	if !ok || callee == callerKey {
+		return
+	}
+
+	res.adj[callerKey][callee] = struct{}{}
+	if _, ok := res.callersOf[callee]; !ok {
+		res.callersOf[callee] = map[string]struct{}{}
+	}
+
+	res.callersOf[callee][callerKey] = struct{}{}
+	if _, seen := callFirstPos[callerKey][callee]; !seen {
+		callFirstPos[callerKey][callee] = res.fset.Position(ce.Pos()).Offset
+	}
 }
 
 func callNameFromExpr(e ast.Expr) string {
@@ -344,16 +397,8 @@ func (res *analysisResult) findConstructors(typeSet map[string]struct{}) {
 	}
 }
 
-// isConstructorLikeName reports whether a free function name should be
-// considered a constructor for ordering purposes. Historically only names with
-// prefix "New" were treated as constructors. The project source uses a
-// lowercase form (e.g. newEmitter) that returns the type; we extend detection
-// to accept that pattern so that such helper constructors are clustered
-// immediately after their type.
-// isConstructorLikeName retained for potential future use; now any free
-// function returning the type is considered a constructor. Kept to avoid
-// removing previously used symbol.
-func isConstructorLikeName(name string) bool { return strings.HasPrefix(name, "New") }
+// (previous helper isConstructorLikeName removed: constructor detection now
+// purely return-type based)
 
 func resolveResultTypeToIdent(t ast.Expr) string {
 	for {
@@ -418,6 +463,7 @@ func (res *analysisResult) computeUsers(typeSet map[string]struct{}) {
 			if idx := strings.LastIndex(name, "."); idx != -1 {
 				name = name[idx+1:]
 			}
+
 			methodSet[name] = tn
 		}
 	}
@@ -438,6 +484,20 @@ func (res *analysisResult) inspectFuncForUsers(
 	ctorSet, methodSet map[string]string,
 ) {
 	name := fd.Name.Name
+
+	// If this function is a constructor for some type, we do NOT want to
+	// consider it a 'user' of any other types it happens to reference in its
+	// parameters or body. Otherwise a constructor that accepts existing types
+	// (eg. takes *DirectoryPath but returns FileInfo) would be emitted in the
+	// users section of the parameter type's cluster, preceding its own type
+	// declaration, which is undesirable. We also don't need constructors to be
+	// classified as users of their constructed type (they are emitted in the
+	// constructors phase). So we simply skip user classification entirely for
+	// constructor functions.
+	if _, isCtor := ctorSet[name]; isCtor {
+		return
+	}
+
 	for tn := range typeSet {
 		if usesType(fd, tn) {
 			res.users[tn][name] = struct{}{}

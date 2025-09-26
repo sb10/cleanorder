@@ -710,7 +710,9 @@ var slash = []byte{'/'} //nolint:gochecknoglobals
 type DirectoryPath struct { Name string; Parent *DirectoryPath }
 
 // factory-like function returning *DirectoryPath but not named New
-func directoryPathFrom(name string, parent *DirectoryPath) *DirectoryPath { return &DirectoryPath{Name:name, Parent:parent} }
+func directoryPathFrom(name string, parent *DirectoryPath) *DirectoryPath {
+	return &DirectoryPath{Name: name, Parent: parent}
+}
 
 type FileInfo struct { Name string }
 
@@ -743,16 +745,23 @@ func Z() { _ = bytes.Compare([]byte("a"), []byte("b")); _ = strings.Compare("a",
 
 		// Issue 2: type FileInfo should appear before factory function fileInfoFromStatsInfo
 		fileInfoIdx := findIndex(order, "type FileInfo")
+
 		factoryIdx := findIndex(order, "func fileInfoFromStatsInfo")
 		if fileInfoIdx == -1 || factoryIdx == -1 {
 			t.Fatalf("missing FileInfo type or factory function: %v", order)
 		}
-		if !(fileInfoIdx < factoryIdx) {
+
+		if fileInfoIdx >= factoryIdx {
 			t.Fatalf("FileInfo type should precede its factory function: %v", order)
 		}
 
 		// Issue 3: methods for both directory and directories present
-		need := []string{"method directory.Add", "method directory.Output", "method directories.Add", "method directories.Output"}
+		need := []string{
+			"method directory.Add",
+			"method directory.Output",
+			"method directories.Add",
+			"method directories.Output",
+		}
 		for _, n := range need {
 			if findIndex(order, n) == -1 {
 				t.Fatalf("missing method %s in output order: %v", n, order)
