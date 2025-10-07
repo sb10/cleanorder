@@ -19,7 +19,10 @@ import (
 func runTool(t *testing.T, target string) []byte {
 	t.Helper()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Allow more time for initial compilation of stdlib packages used by
+	// test inputs (e.g. net/http). Once built, subsequent runs are fast, but
+	// in constrained CI environments the previous 5s budget was too tight.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	// run `go run . -dry <target>` in repository directory (current working dir)
@@ -214,6 +217,53 @@ func A() {}
 
 		if constIdx < impIdx {
 			t.Fatalf("const should appear after imports; got order: %v", order)
+		}
+	})
+
+	t.Run("inline_trailing_comment_preserved_on_var_decl", func(t *testing.T) {
+		// Reproduce reported issue: a long single-line var declaration with an
+		// inline trailing comment (nolint) should remain on the same line. The
+		// bug causes the comment to be moved to a separate line (sometimes with
+		// an added blank line) after reordering/formatting.
+		src := `package p
+
+import (
+  "net/http"
+  "os"
+)
+
+// an unrelated type so the tool performs reordering work
+type Dummy struct{}
+
+// long var initialiser with nested calls and trailing nolint comment
+var index = http.FileServer(http.FS(os.DirFS("./src"))) //nolint:gochecknoglobals
+
+func use() { _ = index }
+`
+
+		f := writeTempFile(t, "inline_comment.go", src)
+		out := runTool(t, f)
+
+		lines := strings.Split(string(out), "\n")
+		found := false
+		for _, ln := range lines {
+			if strings.Contains(ln, "var index =") {
+				// Expect nolint comment still on same physical line
+				if !strings.Contains(ln, "//nolint:gochecknoglobals") {
+					// Provide surrounding context for easier debugging
+					context := strings.Join(lines, "\n")
+					// Fail explicitly showing the produced output
+					// (The bug manifests as the comment appearing on the next line.)
+					t.Fatalf("inline trailing nolint comment moved off the var line. Output:\n%s", context)
+				}
+
+				found = true
+				break
+			}
+		}
+
+		if !found {
+			t.Fatalf("did not find var index line in output. Output:\n%s", string(out))
 		}
 	})
 

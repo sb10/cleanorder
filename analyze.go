@@ -121,12 +121,20 @@ func (res *analysisResult) adjustDeclStartForDoc(fset *token.FileSet, gd *ast.Ge
 }
 
 func (res *analysisResult) extendEndForInlineComments(fset *token.FileSet, gd *ast.GenDecl, e int) int {
-	start := fset.Position(gd.Pos()).Line
-	end := fset.Position(gd.End()).Line
+	startLine := fset.Position(gd.Pos()).Line
+	endLine := fset.Position(gd.End()).Line
 
 	for _, cg := range res.file.Comments {
 		for _, c := range cg.List {
-			if res.commentLineWithin(fset, c, start, end) {
+			if res.commentLineWithin(fset, c, startLine, endLine) {
+				e = res.extendEndForComment(fset, c, e)
+			}
+			// Additionally, if the comment appears on the same line as the end
+			// of the declaration (inline trailing comment), include it. This is
+			// required so that re-emitting the declaration preserves inline
+			// comments like "//nolint" that would otherwise be separated onto
+			// a new line when go/format runs after we splice declarations.
+			if fset.Position(c.Pos()).Line == endLine {
 				e = res.extendEndForComment(fset, c, e)
 			}
 		}
@@ -174,14 +182,25 @@ func (res *analysisResult) recordGenDecl(gd *ast.GenDecl, s, e int) {
 
 func (res *analysisResult) handleFuncDecl(fset *token.FileSet, fd *ast.FuncDecl) {
 	fs := fset.Position(fd.Pos()).Offset
-
 	fe := fset.Position(fd.End()).Offset
 	if fd.Doc != nil {
 		fs = fset.Position(fd.Doc.Pos()).Offset
 	}
 
-	recv := getRecvType(fd)
+	// Extend end to capture any trailing inline comment on the same line as
+	// the function's closing brace. Without this, an inline comment that
+	// belongs logically to the function (e.g. a //nolint at end of single-line
+	// func) could appear detached after reordering.
+	funcEndLine := fset.Position(fd.End()).Line
+	for _, cg := range res.file.Comments {
+		for _, c := range cg.List {
+			if fset.Position(c.Pos()).Line == funcEndLine {
+				fe = res.extendEndForComment(fset, c, fe)
+			}
+		}
+	}
 
+	recv := getRecvType(fd)
 	key := fd.Name.Name
 	if recv != "" { // qualify method key to avoid collisions between different receiver types with same method name
 		key = recv + "." + key
