@@ -223,8 +223,11 @@ func A() {}
 	t.Run("inline_trailing_comment_preserved_on_var_decl", func(t *testing.T) {
 		// Reproduce reported issue: a long single-line var declaration with an
 		// inline trailing comment (nolint) should remain on the same line. The
-		// bug causes the comment to be moved to a separate line (sometimes with
-		// an added blank line) after reordering/formatting.
+		// original bug moved the comment to a separate line (sometimes with an
+		// added blank line) after reordering/formatting. A regression introduced
+		// duplication where the comment appeared both inline AND again on the
+		// following line. This test asserts: (1) comment stays on the same line
+		// and (2) it appears exactly once in the output.
 		src := `package p
 
 import (
@@ -244,26 +247,28 @@ func use() { _ = index }
 		f := writeTempFile(t, "inline_comment.go", src)
 		out := runTool(t, f)
 
-		lines := strings.Split(string(out), "\n")
-		found := false
+		outStr := string(out)
+		lines := strings.Split(outStr, "\n")
+		foundLine := ""
 		for _, ln := range lines {
 			if strings.Contains(ln, "var index =") {
-				// Expect nolint comment still on same physical line
-				if !strings.Contains(ln, "//nolint:gochecknoglobals") {
-					// Provide surrounding context for easier debugging
-					context := strings.Join(lines, "\n")
-					// Fail explicitly showing the produced output
-					// (The bug manifests as the comment appearing on the next line.)
-					t.Fatalf("inline trailing nolint comment moved off the var line. Output:\n%s", context)
-				}
-
-				found = true
+				foundLine = ln
 				break
 			}
 		}
 
-		if !found {
-			t.Fatalf("did not find var index line in output. Output:\n%s", string(out))
+		if foundLine == "" {
+			t.Fatalf("did not find var index line in output. Output:\n%s", outStr)
+		}
+
+		if !strings.Contains(foundLine, "//nolint:gochecknoglobals") {
+			t.Fatalf("inline nolint comment not preserved on same line. Var line: %q\nFull output:\n%s", foundLine, outStr)
+		}
+
+		// Ensure the nolint comment appears exactly once (no duplication on next line)
+		occurrences := strings.Count(outStr, "//nolint:gochecknoglobals")
+		if occurrences != 1 {
+			t.Fatalf("expected exactly 1 occurrence of inline comment, got %d. Output:\n%s", occurrences, outStr)
 		}
 	})
 

@@ -89,11 +89,13 @@ func (res *analysisResult) collectDecls(fset *token.FileSet, file *ast.File) {
 		e := fset.Position(decl.End()).Offset
 
 		if gd, ok := decl.(*ast.GenDecl); ok {
-			res.handleGenDecl(fset, gd, s, e)
+			// capture adjusted start/end (includes doc + inline trailing comments)
+			s, e = res.handleGenDecl(fset, gd, s, e)
 		}
 
 		if fd, ok := decl.(*ast.FuncDecl); ok {
-			res.handleFuncDecl(fset, fd)
+			// handleFuncDecl returns possibly extended end accounting for inline comments
+			_, e = res.handleFuncDecl(fset, fd)
 		}
 
 		if res.firstDeclStart == -1 || s < res.firstDeclStart {
@@ -106,10 +108,11 @@ func (res *analysisResult) collectDecls(fset *token.FileSet, file *ast.File) {
 	}
 }
 
-func (res *analysisResult) handleGenDecl(fset *token.FileSet, gd *ast.GenDecl, s, e int) {
+func (res *analysisResult) handleGenDecl(fset *token.FileSet, gd *ast.GenDecl, s, e int) (int, int) {
 	s = res.adjustDeclStartForDoc(fset, gd, s)
 	e = res.extendEndForInlineComments(fset, gd, e)
 	res.recordGenDecl(gd, s, e)
+	return s, e
 }
 
 func (res *analysisResult) adjustDeclStartForDoc(fset *token.FileSet, gd *ast.GenDecl, s int) int {
@@ -180,7 +183,7 @@ func (res *analysisResult) recordGenDecl(gd *ast.GenDecl, s, e int) {
 	}
 }
 
-func (res *analysisResult) handleFuncDecl(fset *token.FileSet, fd *ast.FuncDecl) {
+func (res *analysisResult) handleFuncDecl(fset *token.FileSet, fd *ast.FuncDecl) (int, int) {
 	fs := fset.Position(fd.Pos()).Offset
 	fe := fset.Position(fd.End()).Offset
 	if fd.Doc != nil {
@@ -209,6 +212,7 @@ func (res *analysisResult) handleFuncDecl(fset *token.FileSet, fd *ast.FuncDecl)
 	fb := funcBlock{key: key, start: fs, end: fe, recvType: recv, isMethod: recv != ""}
 	res.funcBlocks = append(res.funcBlocks, fb)
 	res.funcByKey[fb.key] = fb
+	return fs, fe
 }
 
 // buildCallGraph inspects function bodies to build adjacency and call sequence
