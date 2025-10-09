@@ -823,6 +823,53 @@ func Z() { _ = bytes.Compare([]byte("a"), []byte("b")); _ = strings.Compare("a",
 			}
 		}
 	})
+
+	// Regression test: ensure we do not move private independent functions
+	// that originally appear after a primary public struct to above it. The
+	// earlier implementation moved helper funcs ahead of an exported struct.
+	// We now only elevate independent funcs that were already before the first
+	// exported, documented type.
+	t.Run("do_not_move_post_type_independent_funcs", func(t *testing.T) {
+		// The snippet models an exported documented type followed only by
+		// independent (zero-degree) private helpers that should remain after it.
+		// There are no independent functions before the type, so none should be
+		// elevated.
+		src := `package p
+
+// DBInfo is the primary exported type for this file.
+type DBInfo struct {
+    A int
+}
+
+// NOTE: All following funcs are independent (no calls in/out) and come after
+// the exported type. They should not be moved above DBInfo.
+func helperPopulate() {}
+func helperScan() {}
+func helperCheck() {}
+func helperCount() {}
+`
+
+		f := writeTempFile(t, "post_type_helpers.go", src)
+		out := runTool(t, f)
+		order := declOrder(t, out)
+
+		idxType := findIndex(order, "type DBInfo")
+		idxPopulate := findIndex(order, "func helperPopulate")
+		idxScan := findIndex(order, "func helperScan")
+		idxCheck := findIndex(order, "func helperCheck")
+		idxCount := findIndex(order, "func helperCount")
+
+		if idxType == -1 || idxPopulate == -1 || idxScan == -1 || idxCheck == -1 || idxCount == -1 {
+			// show order for debugging
+			t.Fatalf("expected declarations not found: %v", order)
+		}
+
+		// All helpers should remain strictly after the type declaration.
+		if !(idxPopulate > idxType && idxScan > idxType && idxCheck > idxType && idxCount > idxType) {
+			// show order for debugging
+			t.Fatalf("helpers should remain after DBInfo type: order=%v", order)
+		}
+	})
 }
 
 func TestNoChangeWhenAlreadyOrdered_NoExtraBlankLines(t *testing.T) {

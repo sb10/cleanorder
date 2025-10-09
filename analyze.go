@@ -21,6 +21,7 @@ type analysisResult struct {
 	typeBlocks     []block
 	typeNames      []string
 	typeDeclFor    map[string]block
+	typeHasDoc     map[string]bool
 	funcBlocks     []funcBlock
 	funcByKey      map[string]funcBlock
 	firstDeclStart int
@@ -47,6 +48,7 @@ func newAnalysisResult(fset *token.FileSet, src []byte, file *ast.File) *analysi
 		typeBlocks:     []block{},
 		typeNames:      []string{},
 		typeDeclFor:    map[string]block{},
+		typeHasDoc:     map[string]bool{},
 		funcBlocks:     []funcBlock{},
 		funcByKey:      map[string]funcBlock{},
 		firstDeclStart: -1,
@@ -177,6 +179,9 @@ func (res *analysisResult) recordGenDecl(gd *ast.GenDecl, s, e int) {
 				name := ts.Name.Name
 				res.typeDeclFor[name] = block{s, e}
 				res.typeNames = append(res.typeNames, name)
+				if gd.Doc != nil {
+					res.typeHasDoc[name] = true
+				}
 			}
 		}
 	default:

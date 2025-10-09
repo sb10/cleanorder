@@ -14,27 +14,84 @@ type emitter struct {
 	helpers      map[string]map[string]struct{}
 	users        map[string]map[string]struct{}
 	independent  []string
+	// earlyIndependent is the subset of independent free functions that
+	// originally appear before the first type declaration in the file. We
+	// only emit these at the top. Independent functions that appear after
+	// the first type are left in place (emitted later in source order) to
+	// avoid moving private helpers above a file's primary public type.
+	earlyIndependent []string
 
 	writtenDecl map[int]struct{}
 	writtenFunc map[string]struct{}
 }
 
 func newEmitter(a *analysisResult) *emitter {
-	return &emitter{
-		a:            a,
-		src:          a.src,
-		out:          &bytes.Buffer{},
-		funcByKey:    a.funcByKey,
-		adj:          a.adj,
-		callSeq:      a.callSeq,
-		constructors: a.constructors,
-		methods:      a.methods,
-		helpers:      a.helpers,
-		users:        a.users,
-		independent:  a.independent,
-		writtenDecl:  map[int]struct{}{},
-		writtenFunc:  map[string]struct{}{},
+	e := &emitter{
+		a:                a,
+		src:              a.src,
+		out:              &bytes.Buffer{},
+		funcByKey:        a.funcByKey,
+		adj:              a.adj,
+		callSeq:          a.callSeq,
+		constructors:     a.constructors,
+		methods:          a.methods,
+		helpers:          a.helpers,
+		users:            a.users,
+		independent:      a.independent,
+		writtenDecl:      map[int]struct{}{},
+		writtenFunc:      map[string]struct{}{},
+		earlyIndependent: []string{},
 	}
+
+	// Determine first exported, documented type start offset.
+	firstExportedDocTypeStart := -1
+	for _, tn := range a.typeNames {
+		if len(tn) == 0 || tn[0] < 'A' || tn[0] > 'Z' { // unexported
+			continue
+		}
+		if !a.typeHasDoc[tn] { // require doc comment to infer 'primary' type
+			continue
+		}
+		if b, ok := a.typeDeclFor[tn]; ok {
+			if firstExportedDocTypeStart == -1 || b.start < firstExportedDocTypeStart {
+				firstExportedDocTypeStart = b.start
+			}
+		}
+	}
+
+	// If no exported documented type, keep legacy behaviour (all independents elevated)
+	if firstExportedDocTypeStart == -1 {
+		e.earlyIndependent = append(e.earlyIndependent, e.independent...)
+		return e
+	}
+
+	// Decide whether to suppress moving independents that appear after this primary type.
+	// If every independent function starts after the type, we treat them as
+	// trailing helpers and keep them in place. If at least one appears before,
+	// we elevate only those before.
+	allAfter := true
+	for _, k := range e.independent {
+		if fb, ok := e.funcByKey[k]; ok && fb.start < firstExportedDocTypeStart {
+			allAfter = false
+			break
+		}
+	}
+
+	for _, k := range e.independent {
+		fb, ok := e.funcByKey[k]
+		if !ok {
+			continue
+		}
+		if allAfter {
+			// keep all in place (earlyIndependent remains empty)
+			continue
+		}
+		if fb.start < firstExportedDocTypeStart {
+			e.earlyIndependent = append(e.earlyIndependent, k)
+		}
+	}
+
+	return e
 }
 
 func (e *emitter) build() {
@@ -44,9 +101,11 @@ func (e *emitter) build() {
 	// const/var blocks
 	e.writeConstVar()
 
-	// independent functions
-	if len(e.independent) > 0 {
-		ord := minimalReorderSubset(sortByOriginal(e.independent, e.funcByKey), 0, e.adj, e.callSeq)
+	// independent functions (only those that originally appeared before the
+	// first type). Others are left in place to minimise movement when no
+	// ordering constraints require change.
+	if len(e.earlyIndependent) > 0 {
+		ord := minimalReorderSubset(sortByOriginal(e.earlyIndependent, e.funcByKey), 0, e.adj, e.callSeq)
 		for _, k := range ord {
 			e.writeFuncIfNotWritten(k)
 		}
