@@ -308,9 +308,24 @@ func (e *emitter) writeUsersForType(tn string) {
 	userList := []string{}
 
 	for _, fb := range e.a.funcBlocks {
-		if _, ok := e.users[tn][fb.key]; ok {
-			userList = append(userList, fb.key)
+		if _, ok := e.users[tn][fb.key]; !ok {
+			continue
 		}
+
+		// Ensure we never emit a method before its receiver type has been
+		// written. This can occur when a method is considered a "user" of a
+		// different type that is processed earlier in source order.
+		if fb.isMethod {
+			if b, ok := e.a.typeDeclFor[fb.recvType]; ok {
+				if !e.isWritten(b) {
+					// receiver type not yet emitted; skip here (it will be
+					// emitted with its own type cluster later)
+					continue
+				}
+			}
+		}
+
+		userList = append(userList, fb.key)
 	}
 
 	if len(userList) == 0 {

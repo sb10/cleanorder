@@ -220,6 +220,44 @@ func A() {}
 		}
 	})
 
+	// Regression: do not emit a method as a "user" of another type before the
+	// method receiver's type is declared. Type declarations must precede any code
+	// that needs that type.
+	t.Run("method_user_not_emitted_before_own_type", func(t *testing.T) {
+		src := `package p
+
+// Some type that will be processed first
+type Other struct{}
+
+// Receiver type declared after
+type IDAgeDirs struct{}
+
+// Method uses Other; previous logic could incorrectly emit this as a user of
+// Other (placing it before IDAgeDirs). It must remain after IDAgeDirs.
+func (i IDAgeDirs) Get(o Other) {}
+`
+
+		f := writeTempFile(t, "basedirs_like.go", src)
+		out := runTool(t, f)
+		order := declOrder(t, out)
+
+		idxOther := findIndex(order, "type Other")
+		idxType := findIndex(order, "type IDAgeDirs")
+		idxMeth := findIndex(order, "method IDAgeDirs.Get")
+
+		if idxOther == -1 || idxType == -1 || idxMeth == -1 {
+			t.Fatalf("missing expected decls: %v", order)
+		}
+
+		if !(idxType < idxMeth) {
+			t.Fatalf("receiver type must come before its method: %v", order)
+		}
+
+		if !(idxOther < idxType) {
+			t.Fatalf("sanity: Other should remain before IDAgeDirs: %v", order)
+		}
+	})
+
 	// Regression for bug report: A function/method that returns a slice of the
 	// immediately preceding type should not be moved beneath unrelated private
 	// helpers. Specifically, a public method returning []History should be
