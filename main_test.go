@@ -220,6 +220,54 @@ func A() {}
 		}
 	})
 
+	// Regression for bug report: A function/method that returns a slice of the
+	// immediately preceding type should not be moved beneath unrelated private
+	// helpers. Specifically, a public method returning []History should be
+	// treated as a "user" of type History and emitted right after the type even
+	// if the type has no constructors or methods.
+	t.Run("type_users_emitted_even_without_methods_or_ctors_and_before_private_helpers", func(t *testing.T) {
+		src := `package p
+
+// History contains usage info
+type History struct{}
+
+// independent private helpers that should not be preferred over public users
+func validateMountPoints() {}
+func calc() {}
+
+// a different type declared in this file
+type BaseDirReader struct{}
+
+// Public method returning a slice of the immediately preceding type; should
+// be emitted with the users of History (ie. right after History), not below
+// the unrelated private helpers above.
+func (b *BaseDirReader) History() ([]History, error) { return nil, nil }
+`
+
+		f := writeTempFile(t, "history_like.go", src)
+		out := runTool(t, f)
+		order := declOrder(t, out)
+
+		idxType := findIndex(order, "type History")
+		idxMeth := findIndex(order, "method BaseDirReader.History")
+		idxPriv1 := findIndex(order, "func validateMountPoints")
+		idxPriv2 := findIndex(order, "func calc")
+
+		if idxType == -1 || idxMeth == -1 || idxPriv1 == -1 || idxPriv2 == -1 {
+			t.Fatalf("missing expected decls: %v", order)
+		}
+
+		// The user method should be emitted after the type
+		if !(idxType < idxMeth) {
+			t.Fatalf("user method should appear after its type: %v", order)
+		}
+
+		// and before unrelated private helpers
+		if !(idxMeth < idxPriv1 && idxMeth < idxPriv2) {
+			t.Fatalf("public user should be preferred over uncalled private helpers: %v", order)
+		}
+	})
+
 	t.Run("inline_trailing_comment_preserved_on_var_decl", func(t *testing.T) {
 		// Reproduce reported issue: a long single-line var declaration with an
 		// inline trailing comment (nolint) should remain on the same line. The

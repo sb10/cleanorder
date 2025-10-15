@@ -1,6 +1,9 @@
 package main
 
-import "bytes"
+import (
+	"bytes"
+	"sort"
+)
 
 type emitter struct {
 	a            *analysisResult
@@ -105,7 +108,8 @@ func (e *emitter) build() {
 	// first type). Others are left in place to minimise movement when no
 	// ordering constraints require change.
 	if len(e.earlyIndependent) > 0 {
-		ord := minimalReorderSubset(sortByOriginal(e.earlyIndependent, e.funcByKey), 0, e.adj, e.callSeq)
+		base := sortExportedFirstByOriginal(e.earlyIndependent, e.funcByKey)
+		ord := minimalReorderSubset(base, 0, e.adj, e.callSeq)
 		for _, k := range ord {
 			e.writeFuncIfNotWritten(k)
 		}
@@ -174,18 +178,18 @@ func (e *emitter) processType(tn string, b block) {
 	hasCtors := len(e.constructors[tn]) > 0
 	hasMethods := len(e.methods[tn]) > 0
 
-	if !hasCtors && !hasMethods {
-		if !e.isWritten(b) {
-			e.writeNL()
-			e.out.Write(e.src[b.start:b.end])
-			e.markWritten(b)
-		}
-
-		return
+	// Always emit the type declaration itself.
+	if !e.isWritten(b) {
+		e.writeNL()
+		e.out.Write(e.src[b.start:b.end])
+		e.markWritten(b)
 	}
 
-	e.writeDeclIfNeeded(b)
-	e.writeConstructorsAndCluster(tn)
+	// If there are constructors or methods, emit them clustered; otherwise
+	// we still may have users of this type that must appear after the type.
+	if hasCtors || hasMethods {
+		e.writeConstructorsAndCluster(tn)
+	}
 	e.writeUsersForType(tn)
 	e.writeNL()
 }
@@ -221,7 +225,7 @@ func (e *emitter) writeRemainingComponents() {
 
 		comp := e.collectComponent(key, remainingSet)
 
-		ord := sortByOriginal(comp, e.funcByKey)
+		ord := sortExportedFirstByOriginal(comp, e.funcByKey)
 		ord = minimalReorderSubset(ord, 0, e.adj, e.callSeq)
 
 		ord = packWithinSubset(ord, 0, e.adj, e.callSeq)
@@ -304,7 +308,7 @@ func (e *emitter) writeUsersForType(tn string) {
 	userList := []string{}
 
 	for _, fb := range e.a.funcBlocks {
-		if _, ok := e.users[tn][fb.key]; ok && !fb.isMethod {
+		if _, ok := e.users[tn][fb.key]; ok {
 			userList = append(userList, fb.key)
 		}
 	}
@@ -313,7 +317,7 @@ func (e *emitter) writeUsersForType(tn string) {
 		return
 	}
 
-	uord := sortByOriginal(userList, e.funcByKey)
+	uord := sortExportedFirstByOriginal(userList, e.funcByKey)
 	uord = minimalReorderSubset(uord, 0, e.adj, e.callSeq)
 
 	uord = packWithinSubset(uord, 0, e.adj, e.callSeq)
@@ -520,4 +524,45 @@ func buildOutput(a *analysisResult) []byte {
 	e.build()
 
 	return e.out.Bytes()
+}
+
+// sortExportedFirstByOriginal returns keys ordered so exported (public) names
+// come before private ones, and within each partition items are ordered by
+// original byte offset. Exportedness is determined by the first rune of the
+// function name (for methods, the name after the dot).
+func sortExportedFirstByOriginal(keys []string, funcByKey map[string]funcBlock) []string {
+	out := append([]string(nil), keys...)
+
+	isExported := func(k string) bool {
+		name := k
+		// For methods, key format is "Recv.Name"; extract method name
+		if dot := indexByte(name, '.'); dot >= 0 {
+			name = name[dot+1:]
+		}
+		if name == "" {
+			return false
+		}
+		r := name[0]
+		return r >= 'A' && r <= 'Z'
+	}
+
+	sort.SliceStable(out, func(i, j int) bool {
+		ei, ej := isExported(out[i]), isExported(out[j])
+		if ei != ej {
+			return ei && !ej // exported first
+		}
+		return funcByKey[out[i]].start < funcByKey[out[j]].start
+	})
+
+	return out
+}
+
+// indexByte is a tiny helper to avoid importing strings for a single use.
+func indexByte(s string, c byte) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
 }

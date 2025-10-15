@@ -513,12 +513,41 @@ func (res *analysisResult) computeUsers(typeSet map[string]struct{}) {
 
 	for _, decl := range res.file.Decls {
 		fd, ok := decl.(*ast.FuncDecl)
-		if !ok || fd.Recv != nil {
+		if !ok {
 			continue
 		}
 
-		res.inspectFuncForUsers(fd, typeSet, ctorSet, methodSet)
+		// Classify free functions as users of types they reference.
+		if fd.Recv == nil {
+			res.inspectFuncForUsers(fd, typeSet, ctorSet, methodSet)
+			continue
+		}
+
+		// Additionally, treat methods that reference a different declared
+		// type as users of that type. This ensures methods returning or
+		// mentioning a type (e.g., History()) are considered users of that
+		// type and can be emitted adjacent to the type even if the type has
+		// no methods or constructors.
+		for tn := range typeSet {
+			if usesType(fd, tn) {
+				res.users[tn][res.qualMethodKey(fd)] = struct{}{}
+			}
+		}
 	}
+}
+
+// qualMethodKey returns the analysis key for a method, matching the scheme
+// used for funcBlocks (RecvType.Name).
+func (res *analysisResult) qualMethodKey(fd *ast.FuncDecl) string {
+	name := fd.Name.Name
+	if fd.Recv == nil {
+		return name
+	}
+	rt := getRecvType(fd)
+	if rt == "" {
+		return name
+	}
+	return rt + "." + name
 }
 
 func (res *analysisResult) inspectFuncForUsers(

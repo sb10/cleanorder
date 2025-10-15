@@ -28,8 +28,10 @@ High-level emission order
   - Emit the type's methods and their helper functions as a clustered group.
     Within that cluster the tool tries to place callers before callees and
     pack callees immediately below their callers when possible.
-  - Emit free functions that "use" the type (functions that reference the
-    type in a signature/body or call the type's constructors/methods).
+  - Emit functions and methods that "use" the type (any function or method
+    that references the type in a signature/body or calls the type's
+    constructors/methods). If the type has no constructors or methods, its
+    users are still emitted immediately after the type declaration.
 
 - Any remaining `type` blocks that weren't emitted in the typed loop are
   written next.
@@ -47,9 +49,11 @@ Classification rules used by the emitter
 - Helpers: free functions that are called by methods of a given type. These
   are grouped with the type's methods so related helpers appear near the
   methods that reference them.
-- Users: free functions that reference a type (in params/results/struct
-  fields or body) or that call the type's constructors/methods. Users are
-  emitted after the type's methods/constructors cluster.
+- Users: functions and methods that reference a type (in
+  params/results/struct fields or body) or that call the type's
+  constructors/methods. Users are emitted after the type's
+  methods/constructors cluster, or directly after the type when there are no
+  methods/constructors.
 - Independent free functions: non-methods that are not constructors and have
   no incoming or outgoing call edges within the file.
 
@@ -66,6 +70,13 @@ Ordering constraints and algorithms
 - Packing: within clusters (methods/helpers or call-graph components) the
   emitter will "pack" callees directly beneath their callers when it can
   while still respecting predecessor and call-sequence constraints.
+
+Tie-breakers
+
+- When ordering is otherwise unconstrained, exported (public) functions and
+  methods are preferred over unexported (private). Within each group, original
+  file order is preserved. This applies across independent functions, call-graph
+  components, and type users.
 
 Limitations (brief)
 
