@@ -26,10 +26,14 @@ High-level emission order
   - Emit constructor functions for that type (free functions named `NewX`
     that return `X` or `*X`). Constructors keep their original order.
   - Emit the type's methods and their helper functions as a clustered group.
-    Within that cluster, helpers are placed directly after the first method
-    that calls them (callee-after-first-caller). If a helper is called by
-    multiple methods, it is still anchored under the chosen first caller; the
-    later callers do not force the helper to move further down.
+	Within that cluster, helpers are placed directly after the first method
+	that calls them (callee-after-first-caller). If a helper is called by
+	multiple methods, it is still anchored under the chosen first caller; the
+	later callers do not force the helper to move further down.
+	Note: A free function that is used as a method helper is not treated as a
+	generic "user" of any types it happens to reference. This prevents helpers
+	(e.g., readBody/handleError used by ServeHTTP) from being emitted before
+	their first caller in another type’s user section.
   - Emit functions and methods that "use" the type (any function or method
     that references the type in a signature/body or calls the type's
     constructors/methods). If the type has no constructors or methods, its

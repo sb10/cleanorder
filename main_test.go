@@ -220,18 +220,27 @@ func A() {}
 		}
 	})
 
-	// New rule: callee-after-first-caller. From the bug report: when running on
-	// examples/basedirs_store.go, helper functions basedirsKey and codecDecode
-	// should be moved directly under the first function that calls them, which is
-	// GroupSubDirs. This test feeds that file to the tool and asserts the local
-	// order is GroupSubDirs, then basedirsKey, then codecDecode (helpers can be
-	// shared with other callers later in the file, but they should still land
-	// directly after the first caller).
-	// Note: we do not attempt to compile the example file; the tool only parses
-	// and reorders its declarations.
+	// New rule: callee-after-first-caller. From the bug report: in a basedirs
+	// example, helpers basedirsKey and codecDecode should be moved directly
+	// under the first method that calls them (GroupSubDirs).
+	// We inline a minimal snippet modelling that case.
 	t.Run("basedirs_helpers_follow_first_caller", func(t *testing.T) {
-		path := filepath.Join(mustGetwd(t), "examples", "basedirs_store.go")
-		out := runTool(t, path)
+		src := `package p
+
+type bdReader struct{}
+
+func (bdReader) GroupSubDirs() { basedirsKey(); codecDecode() }
+
+// another method also calling the helpers later
+func (bdReader) Later() { basedirsKey(); codecDecode() }
+
+// helpers
+func basedirsKey() {}
+func codecDecode() {}
+`
+
+		f := writeTempFile(t, "basedirs_store_like.go", src)
+		out := runTool(t, f)
 		order := declOrder(t, out)
 
 		idxGroupSubDirs := findIndex(order, "method bdReader.GroupSubDirs")
@@ -776,6 +785,69 @@ func Z() {}
 
 		if z-y != 1 {
 			t.Fatalf("Y and Z not contiguous beneath Caller: %v", order)
+		}
+	})
+
+	// Regression for bug report: In a generic handler type with a ServeHTTP
+	// method that calls free helper functions readBody and handleError, those
+	// helpers must be emitted after ServeHTTP (callee-after-first-caller within
+	// the type cluster). Previously, the tool could move helpers above the
+	// method when processing examples/server.go.
+	t.Run("server_helpers_after_ServeHTTP", func(t *testing.T) {
+		src := `package p
+
+import (
+  "encoding/json"
+  "errors"
+  "io"
+  "net/http"
+)
+
+type httpError struct { code int; msg string }
+func (h httpError) Error() string { return "" }
+
+type handle[T any] func(T) (any, error)
+
+func (h handle[T]) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+  var val T
+  if err := readBody(r.Body, &val); err != nil { //nolint:nestif
+    handleError(w, err)
+  } else if data, err := h(val); err != nil {
+    handleError(w, err)
+  } else if err = json.NewEncoder(w).Encode(data); err != nil {}
+}
+
+func readBody(r io.ReadCloser, data any) error {
+  defer r.Close(); return nil
+}
+
+func handleError(w http.ResponseWriter, err error) {
+  var herr httpError
+  if errors.As(err, &herr) { _ = herr } else {}
+}
+`
+
+		f := writeTempFile(t, "server_like.go", src)
+		out := runTool(t, f)
+		order := declOrder(t, out)
+
+		serve := findIndex(order, "method handle.ServeHTTP")
+		read := findIndex(order, "func readBody")
+		herr := findIndex(order, "func handleError")
+
+		if serve == -1 || read == -1 || herr == -1 {
+			t.Fatalf("missing ServeHTTP/readBody/handleError: %v", order)
+		}
+
+		// Helpers must come after ServeHTTP
+		if !(serve < read && serve < herr) {
+			t.Fatalf("helpers should be after ServeHTTP: %v", order)
+		}
+
+		// Prefer helpers to be packed near ServeHTTP when unconstrained
+		if !(read == serve+1 || herr == serve+1) {
+			// allow flexibility but encourage packing; failure here helps catch regressions
+			t.Fatalf("expected at least one helper directly after ServeHTTP: %v", order)
 		}
 	})
 

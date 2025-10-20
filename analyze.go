@@ -557,6 +557,13 @@ func (res *analysisResult) inspectFuncForUsers(
 ) {
 	name := fd.Name.Name
 
+	// If this free function is used as a helper by any type's methods, do not
+	// classify it as a "user" of other types it mentions. Helper grouping takes
+	// precedence so the function remains clustered under its first caller.
+	if res.isHelperFunc(name) {
+		return
+	}
+
 	// If this function is a constructor for some type, we do NOT want to
 	// consider it a 'user' of any other types it happens to reference in its
 	// parameters or body. Otherwise a constructor that accepts existing types
@@ -581,6 +588,17 @@ func (res *analysisResult) inspectFuncForUsers(
 	}
 
 	ast.Inspect(fd.Body, func(n ast.Node) bool { return res.handleCallExprForUsers(n, name, ctorSet, methodSet) })
+}
+
+// isHelperFunc reports whether the given free-function name is considered a
+// helper for any declared type (i.e., it is called by methods of that type).
+func (res *analysisResult) isHelperFunc(name string) bool {
+	for _, hm := range res.helpers {
+		if _, ok := hm[name]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func (res *analysisResult) handleCallExprForUsers(n ast.Node, name string, ctorSet, methodSet map[string]string) bool {
