@@ -220,6 +220,38 @@ func A() {}
 		}
 	})
 
+	// New rule: callee-after-first-caller. From the bug report: when running on
+	// examples/basedirs_store.go, helper functions basedirsKey and codecDecode
+	// should be moved directly under the first function that calls them, which is
+	// GroupSubDirs. This test feeds that file to the tool and asserts the local
+	// order is GroupSubDirs, then basedirsKey, then codecDecode (helpers can be
+	// shared with other callers later in the file, but they should still land
+	// directly after the first caller).
+	// Note: we do not attempt to compile the example file; the tool only parses
+	// and reorders its declarations.
+	t.Run("basedirs_helpers_follow_first_caller", func(t *testing.T) {
+		path := filepath.Join(mustGetwd(t), "examples", "basedirs_store.go")
+		out := runTool(t, path)
+		order := declOrder(t, out)
+
+		idxGroupSubDirs := findIndex(order, "method bdReader.GroupSubDirs")
+		idxBasedirsKey := findIndex(order, "func basedirsKey")
+		idxCodecDecode := findIndex(order, "func codecDecode")
+
+		if idxGroupSubDirs == -1 || idxBasedirsKey == -1 || idxCodecDecode == -1 {
+			t.Fatalf("missing expected decls in reordered output: %v", order)
+		}
+
+		// Expect helpers to be packed immediately below the first caller.
+		if !(idxBasedirsKey == idxGroupSubDirs+1) {
+			t.Fatalf("basedirsKey should appear immediately after GroupSubDirs; order=%v", order)
+		}
+
+		if !(idxCodecDecode == idxBasedirsKey+1) {
+			t.Fatalf("codecDecode should appear immediately after basedirsKey; order=%v", order)
+		}
+	})
+
 	// Regression: do not emit a method as a "user" of another type before the
 	// method receiver's type is declared. Type declarations must precede any code
 	// that needs that type.

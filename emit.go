@@ -296,12 +296,141 @@ func (e *emitter) writeConstructorsAndCluster(tn string) {
 	firstCallerIdx, firstCaller := e.findFirstCallerInOrd(ord)
 	pinned := e.computePinnedFromFirstCaller(ord, firstCallerIdx, firstCaller)
 
-	ord = minimalReorderSubset(ord, pinned, e.adj, e.callSeq)
+	// Apply "callee-after-first-caller" within this cluster by constructing
+	// a filtered adjacency and callSeq that only enforce edges from a single
+	// designated first caller per helper (shared callees are anchored under
+	// that caller; later callers do not constrain placement).
+	fAdj, fSeq := e.buildFirstCallerAdjacency(ord, methodList, helperList)
 
-	ord = packWithinSubset(ord, pinned, e.adj, e.callSeq)
+	ord = minimalReorderSubset(ord, pinned, fAdj, fSeq)
+
+	ord = packWithinSubset(ord, pinned, fAdj, fSeq)
 	for _, k := range ord {
 		e.writeFuncIfNotWritten(k)
 	}
+}
+
+// buildFirstCallerAdjacency creates adjacency and call sequence maps for a
+// type's method/helper cluster that implement the "callee-after-first-caller"
+// rule: for each helper, only a single predecessor edge from its designated
+// first caller is retained. The designated caller is chosen as follows:
+//   - Prefer a method that calls the largest number of helpers (anchor).
+//   - If the anchor calls H, use the anchor; otherwise, use the earliest method
+//     in the cluster order that calls H.
+//
+// Call sequences are restricted to helper calls only.
+func (e *emitter) buildFirstCallerAdjacency(ord, methodList, helperList []string) (map[string]map[string]struct{}, map[string][]string) {
+	ordIdx := map[string]int{}
+	for i, k := range ord {
+		ordIdx[k] = i
+	}
+
+	// Build callers-in-cluster for each helper
+	callersOf := map[string][]string{}
+	helperSet := map[string]struct{}{}
+	methodSet := map[string]struct{}{}
+	for _, h := range helperList {
+		helperSet[h] = struct{}{}
+	}
+	for _, m := range methodList {
+		methodSet[m] = struct{}{}
+	}
+
+	for _, m := range methodList {
+		for cal := range e.adj[m] {
+			if _, isHelper := helperSet[cal]; isHelper {
+				callersOf[cal] = append(callersOf[cal], m)
+			}
+		}
+	}
+
+	// Choose anchor: method that calls the most helpers (tie -> earliest in ord)
+	anchor := ""
+	maxCount := -1
+	for _, m := range methodList {
+		cnt := 0
+		for cal := range e.adj[m] {
+			if _, isHelper := helperSet[cal]; isHelper {
+				cnt++
+			}
+		}
+		if cnt > maxCount || (cnt == maxCount && cnt > 0 && (anchor == "" || ordIdx[m] < ordIdx[anchor])) {
+			if cnt > 0 {
+				anchor = m
+				maxCount = cnt
+			}
+		}
+	}
+
+	// Initialise filtered structures
+	fAdj := map[string]map[string]struct{}{}
+	fSeq := map[string][]string{}
+	for _, k := range ord {
+		fAdj[k] = map[string]struct{}{}
+	}
+
+	// Record designated caller for each helper
+	designated := map[string]string{}
+
+	// For each helper, select designated first caller and add single edge
+	for _, h := range helperList {
+		cs := callersOf[h]
+		if len(cs) == 0 {
+			continue
+		}
+
+		// Prefer anchor if it calls h
+		chosen := ""
+		if anchor != "" {
+			for _, m := range cs {
+				if m == anchor {
+					chosen = m
+					break
+				}
+			}
+		}
+		if chosen == "" {
+			// fallback: earliest caller in ord
+			chosen = cs[0]
+			for _, m := range cs[1:] {
+				if ordIdx[m] < ordIdx[chosen] {
+					chosen = m
+				}
+			}
+		}
+
+		designated[h] = chosen
+
+		if _, ok := fAdj[chosen]; !ok {
+			fAdj[chosen] = map[string]struct{}{}
+		}
+		fAdj[chosen][h] = struct{}{}
+	}
+
+	// Restrict call sequences: only include helpers for which the method is
+	// the designated first caller, preserving the caller's original first-use order.
+	for _, m := range methodList {
+		if seq, ok := e.callSeq[m]; ok && len(seq) > 0 {
+			filtered := make([]string, 0, len(seq))
+			seen := map[string]struct{}{}
+			for _, c := range seq {
+				if _, isHelper := helperSet[c]; isHelper && designated[c] == m {
+					if _, s := seen[c]; !s {
+						filtered = append(filtered, c)
+						seen[c] = struct{}{}
+					}
+				}
+			}
+			if len(filtered) > 0 {
+				fSeq[m] = filtered
+			}
+		}
+	}
+
+	// Methods do not depend on other methods in this filtered model; we avoid
+	// introducing method->method edges so methods keep original relative order.
+
+	return fAdj, fSeq
 }
 
 func (e *emitter) writeUsersForType(tn string) {

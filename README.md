@@ -26,8 +26,10 @@ High-level emission order
   - Emit constructor functions for that type (free functions named `NewX`
     that return `X` or `*X`). Constructors keep their original order.
   - Emit the type's methods and their helper functions as a clustered group.
-    Within that cluster the tool tries to place callers before callees and
-    pack callees immediately below their callers when possible.
+    Within that cluster, helpers are placed directly after the first method
+    that calls them (callee-after-first-caller). If a helper is called by
+    multiple methods, it is still anchored under the chosen first caller; the
+    later callers do not force the helper to move further down.
   - Emit functions and methods that "use" the type (any function or method
     that references the type in a signature/body or calls the type's
     constructors/methods). If the type has no constructors or methods, its
@@ -59,17 +61,22 @@ Classification rules used by the emitter
 
 Ordering constraints and algorithms
 
-- Caller-before-callee: the ordering algorithms add predecessor edges so
-  that every caller precedes its callee. The output guarantees this where
-  possible.
+- Callee-after-first-caller (within clusters): for helpers grouped under a
+  type's methods, each helper is anchored immediately beneath a single
+  designated first caller. When a helper has multiple callers among the
+  methods, the first caller is chosen as the method that calls the most
+  helpers (ties broken by earliest appearance). Other callers do not impose
+  additional predecessor constraints on that helper inside the cluster.
+  Outside of clusters (e.g., among free functions), callers still precede
+  their callees as before.
 - Call sequencing: if a function calls A then B in that order, the tool
   records that sequence and prefers to keep A before B when both are in the
   reordering subset.
 - Minimal movement: reorders try to move as little as possible from the
   original layout (stable sort by original offsets is used as a base).
-- Packing: within clusters (methods/helpers or call-graph components) the
-  emitter will "pack" callees directly beneath their callers when it can
-  while still respecting predecessor and call-sequence constraints.
+- Packing: within clusters, helpers are packed contiguously under their first
+  caller in the order the caller first uses them. Among remaining reordering
+  regions, packing behaves as before while respecting constraints.
 
 Tie-breakers
 
