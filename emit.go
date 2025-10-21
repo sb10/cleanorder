@@ -170,6 +170,15 @@ func (e *emitter) writeTypes() {
 			continue
 		}
 
+		// Skip incidental types here; they will be emitted immediately before
+		// their first user to avoid breaking method grouping on other types.
+		if _, inc := e.a.incidentalTypes[tn]; inc {
+			// Fully defer: neither the type nor its users are emitted here.
+			// The declaration will be inlined immediately before the first
+			// user in writeRemainingFuncs.
+			continue
+		}
+
 		e.processType(tn, b)
 	}
 }
@@ -196,6 +205,22 @@ func (e *emitter) processType(tn string, b block) {
 
 func (e *emitter) writeTypeBlocks() {
 	for _, b := range e.a.typeBlocks {
+		// Determine the type name for this block to check incidental status
+		tn := ""
+		for name, blk := range e.a.typeDeclFor {
+			if blk == b {
+				tn = name
+				break
+			}
+		}
+
+		// Skip incidental types; they will be emitted inline before first user
+		if tn != "" {
+			if _, inc := e.a.incidentalTypes[tn]; inc {
+				continue
+			}
+		}
+
 		if !e.isWritten(b) {
 			e.writeNL()
 			e.out.Write(e.src[b.start:b.end])
@@ -466,6 +491,17 @@ func (e *emitter) writeUsersForType(tn string) {
 
 	uord = packWithinSubset(uord, 0, e.adj, e.callSeq)
 	for _, k := range uord {
+		// If this user is a method and references an incidental type, ensure
+		// that type is emitted immediately before the method (kept adjacent).
+		if fb, ok := e.funcByKey[k]; ok && fb.isMethod {
+			for inc := range e.a.incidentalTypes {
+				if _, ok := e.users[inc][k]; ok {
+					if b, ok := e.a.typeDeclFor[inc]; ok && !e.isWritten(b) {
+						e.writeDeclIfNeeded(b)
+					}
+				}
+			}
+		}
 		e.writeFuncIfNotWritten(k)
 	}
 }
@@ -478,6 +514,14 @@ func (e *emitter) writeRemainingFuncs() {
 			continue
 		}
 
+		// Inline incidental type declaration immediately before first user
+		for inc := range e.a.incidentalTypes {
+			if _, ok := e.users[inc][fb.key]; ok {
+				if b, ok := e.a.typeDeclFor[inc]; ok && !e.isWritten(b) {
+					e.writeDeclIfNeeded(b)
+				}
+			}
+		}
 		e.writeFuncIfNotWritten(fb.key)
 	}
 }
@@ -500,6 +544,11 @@ func (e *emitter) buildWrittenKeys() map[string]struct{} {
 		}
 
 		for k := range e.users[tn] {
+			if _, inc := e.a.incidentalTypes[tn]; inc {
+				// Defer these users to allow emitting the incidental type inline.
+				continue
+			}
+
 			writtenKeys[k] = struct{}{}
 		}
 	}

@@ -60,6 +60,12 @@ Classification rules used by the emitter
   constructors/methods. Users are emitted after the type's
   methods/constructors cluster, or directly after the type when there are no
   methods/constructors.
+  - Incidental types: when a type has no constructors or methods and its only
+    users are methods whose receiver types are not declared in the same file,
+    the type declaration is considered incidental and is emitted immediately
+    before the first such user instead of anchoring its own section. This
+    prevents incidental return/parameter types from disrupting grouping and the
+    callee-after-first-caller ordering within the receiver's method cluster.
 - Independent free functions: non-methods that are not constructors and have
   no incoming or outgoing call edges within the file.
 
@@ -73,6 +79,11 @@ Ordering constraints and algorithms
   additional predecessor constraints on that helper inside the cluster.
   Outside of clusters (e.g., among free functions), callers still precede
   their callees as before.
+  - Precedence: the callee-after-first-caller rule for a type's method cluster
+    takes precedence over incidental standalone type declarations that happen
+    to be referenced or returned by those methods. Such incidental types are
+    inlined immediately above the first using method and do not form their own
+    user section.
 - Call sequencing: if a function calls A then B in that order, the tool
   records that sequence and prefers to keep A before B when both are in the
   reordering subset.

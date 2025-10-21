@@ -37,30 +37,35 @@ type analysisResult struct {
 	helpers      map[string]map[string]struct{}
 	users        map[string]map[string]struct{}
 	independent  []string
+	// incidentalTypes: types with no constructors/methods whose only users are
+	// methods on receivers not declared in this file. These should be emitted
+	// immediately before their first user instead of in the type section.
+	incidentalTypes map[string]struct{}
 }
 
 func newAnalysisResult(fset *token.FileSet, src []byte, file *ast.File) *analysisResult {
 	return &analysisResult{
-		fset:           fset,
-		src:            src,
-		file:           file,
-		constVar:       []block{},
-		typeBlocks:     []block{},
-		typeNames:      []string{},
-		typeDeclFor:    map[string]block{},
-		typeHasDoc:     map[string]bool{},
-		funcBlocks:     []funcBlock{},
-		funcByKey:      map[string]funcBlock{},
-		firstDeclStart: -1,
-		lastImportEnd:  -1,
-		lastDeclEnd:    -1,
-		adj:            map[string]map[string]struct{}{},
-		callersOf:      map[string]map[string]struct{}{},
-		callSeq:        map[string][]string{},
-		constructors:   map[string][]string{},
-		methods:        map[string][]string{},
-		helpers:        map[string]map[string]struct{}{},
-		users:          map[string]map[string]struct{}{},
+		fset:            fset,
+		src:             src,
+		file:            file,
+		constVar:        []block{},
+		typeBlocks:      []block{},
+		typeNames:       []string{},
+		typeDeclFor:     map[string]block{},
+		typeHasDoc:      map[string]bool{},
+		funcBlocks:      []funcBlock{},
+		funcByKey:       map[string]funcBlock{},
+		firstDeclStart:  -1,
+		lastImportEnd:   -1,
+		lastDeclEnd:     -1,
+		adj:             map[string]map[string]struct{}{},
+		callersOf:       map[string]map[string]struct{}{},
+		callSeq:         map[string][]string{},
+		constructors:    map[string][]string{},
+		methods:         map[string][]string{},
+		helpers:         map[string]map[string]struct{}{},
+		users:           map[string]map[string]struct{}{},
+		incidentalTypes: map[string]struct{}{},
 	}
 }
 
@@ -396,6 +401,7 @@ func (res *analysisResult) classify() {
 	res.computeHelpers()
 	res.computeUsers(typeSet)
 	res.computeIndependent()
+	res.computeIncidentalTypes(typeSet)
 }
 
 func (res *analysisResult) computeTypeSet() map[string]struct{} {
@@ -632,6 +638,50 @@ func (res *analysisResult) computeIndependent() {
 	for _, fb := range res.funcBlocks {
 		if res.isIndependentCandidate(fb, ctorSet, userSet) {
 			res.independent = append(res.independent, fb.key)
+		}
+	}
+}
+
+// computeIncidentalTypes identifies types that should not anchor their own
+// section: they have no constructors or methods and their only users are
+// methods whose receiver type is not declared in this file. This supports the
+// rule that incidental types shouldn’t disrupt caller-before-callee grouping of
+// receiver methods.
+func (res *analysisResult) computeIncidentalTypes(typeSet map[string]struct{}) {
+	declaredType := func(name string) bool {
+		_, ok := typeSet[name]
+		return ok
+	}
+
+	for tn := range typeSet {
+		// Skip if tn has ctors or methods
+		if len(res.constructors[tn]) > 0 || len(res.methods[tn]) > 0 {
+			continue
+		}
+
+		u := res.users[tn]
+		if len(u) == 0 {
+			continue
+		}
+
+		onlyExternalMethodUsers := true
+		for uname := range u {
+			// Determine if uname is a method key (Recv.Name) and whether its
+			// receiver is declared in this file
+			recv := ""
+			if dot := strings.LastIndex(uname, "."); dot != -1 {
+				recv = uname[:dot]
+			}
+
+			if recv == "" || declaredType(recv) {
+				// Either a free function user, or a method on a declared type
+				onlyExternalMethodUsers = false
+				break
+			}
+		}
+
+		if onlyExternalMethodUsers {
+			res.incidentalTypes[tn] = struct{}{}
 		}
 	}
 }

@@ -220,6 +220,87 @@ func A() {}
 		}
 	})
 
+	// Regression from examples/db.go: a method that returns a type declared in
+	// the same file (gidMountsMap) should not be pulled under that type's
+	// "users" section when it participates in an intra-receiver call chain.
+	// Instead, methods on the same receiver type should remain grouped and obey
+	// callee-after-first-caller: gidsToMountpoints() should be followed
+	// immediately by dcssToMountPoints(), and gidsToMountpoints() itself should
+	// come after updateHistories(). The gidMountsMap type is incidental and
+	// should be kept immediately above gidsToMountpoints(), not treated as a
+	// separate cluster anchor.
+	// We intentionally do NOT declare the BaseDirs type here (as in the real
+	// examples/db.go), so prior logic that classified methods as users of other
+	// types would move gidsToMountpoints() under gidMountsMap. This test
+	// asserts the desired grouping behaviour.
+	t.Run("basedirs_gid_mounts_grouping", func(t *testing.T) {
+		src := `package p
+
+import (
+  "time"
+  "github.com/wtsi-hgi/wrstat-ui/db"
+)
+
+// incidental type used as a return value below
+type gidMountsMap map[uint32]map[string]db.DirSummary
+
+// updateHistories should appear before gidsToMountpoints
+func (b *BaseDirs) updateHistories(gidBase IDAgeDirs) error {
+  _ = b.gidsToMountpoints(gidBase)
+  return nil
+}
+
+// this method returns gidMountsMap but is conceptually part of the BaseDirs
+// method group; it calls dcssToMountPoints
+func (b *BaseDirs) gidsToMountpoints(gidBase IDAgeDirs) gidMountsMap {
+  _ = gidBase
+  return gidMountsMap{0: b.dcssToMountPoints(nil)}
+}
+
+// callee of gidsToMountpoints; should be packed immediately after it
+func (b *BaseDirs) dcssToMountPoints(dcss *AgeDirs) map[string]db.DirSummary {
+  mounts := make(map[string]db.DirSummary)
+  // simulate combining counts/sizes
+  var ds db.DirSummary
+  _ = time.Now()
+  mounts["/"] = ds
+  return mounts
+}
+`
+
+		f := writeTempFile(t, "db_like.go", src)
+		out := runTool(t, f)
+		order := declOrder(t, out)
+
+		idxUpdate := findIndex(order, "method BaseDirs.updateHistories")
+		idxType := findIndex(order, "type gidMountsMap")
+		idxGids := findIndex(order, "method BaseDirs.gidsToMountpoints")
+		idxDcss := findIndex(order, "method BaseDirs.dcssToMountPoints")
+
+		need := map[string]int{"updateHistories": idxUpdate, "gidMountsMap type": idxType, "gidsToMountpoints": idxGids, "dcssToMountPoints": idxDcss}
+		for name, idx := range need {
+			if idx == -1 {
+				t.Fatalf("missing %s in output order: %v", name, order)
+			}
+		}
+
+		// updateHistories should come before gidsToMountpoints
+		if !(idxUpdate < idxGids) {
+			t.Fatalf("updateHistories should appear before gidsToMountpoints: %v", order)
+		}
+
+		// dcssToMountPoints should be immediately after gidsToMountpoints
+		if !(idxDcss == idxGids+1) {
+			t.Fatalf("dcssToMountPoints should be immediately after gidsToMountpoints: %v", order)
+		}
+
+		// The incidental gidMountsMap type should appear immediately above
+		// gidsToMountpoints (kept adjacent, not forcing a separate users section)
+		if !(idxType == idxGids-1) {
+			t.Fatalf("gidMountsMap type should be immediately above gidsToMountpoints: %v", order)
+		}
+	})
+
 	// New rule: callee-after-first-caller. From the bug report: in a basedirs
 	// example, helpers basedirsKey and codecDecode should be moved directly
 	// under the first method that calls them (GroupSubDirs).
