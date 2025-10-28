@@ -220,6 +220,40 @@ func A() {}
 		}
 	})
 
+	// When a constructor returns two types declared in the same file, both type
+	// declarations must appear before the constructor. The constructor should not
+	// be emitted after only the first type.
+	t.Run("constructor_returning_two_types_appears_after_both_types", func(t *testing.T) {
+		src := `package p
+
+// Two related types
+type A struct{}
+type B struct{}
+
+// Constructor-style function returning both A and B; it should be emitted after both types
+func NewAB() (A, B) { return A{}, B{} }
+`
+
+		f := writeTempFile(t, "ctor_two_types.go", src)
+		out := runTool(t, f)
+		order := declOrder(t, out)
+
+		idxA := findIndex(order, "type A")
+		idxB := findIndex(order, "type B")
+		idxCtor := findIndex(order, "func NewAB")
+
+		need := map[string]int{"type A": idxA, "type B": idxB, "func NewAB": idxCtor}
+		for name, idx := range need {
+			if idx == -1 {
+				t.Fatalf("missing %s in output order: %v", name, order)
+			}
+		}
+
+		if !(idxCtor > idxA && idxCtor > idxB) {
+			t.Fatalf("constructor returning two types must appear after both types: %v", order)
+		}
+	})
+
 	// Interface types should be treated the same as other types: the interface
 	// declaration must appear before any declarations that reference it (users),
 	// including methods on other receiver types and typed var declarations.

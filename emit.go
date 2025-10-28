@@ -26,6 +26,8 @@ type emitter struct {
 
 	writtenDecl map[int]struct{}
 	writtenFunc map[string]struct{}
+	// Reverse index of constructor function name -> types it constructs.
+	ctorToTypes map[string][]string
 }
 
 func newEmitter(a *analysisResult) *emitter {
@@ -43,7 +45,15 @@ func newEmitter(a *analysisResult) *emitter {
 		independent:      a.independent,
 		writtenDecl:      map[int]struct{}{},
 		writtenFunc:      map[string]struct{}{},
+		ctorToTypes:      map[string][]string{},
 		earlyIndependent: []string{},
+	}
+
+	// Build reverse constructor map: ctor name -> all types it constructs
+	for tn, list := range a.constructors {
+		for _, c := range list {
+			e.ctorToTypes[c] = append(e.ctorToTypes[c], tn)
+		}
 	}
 
 	// Determine first exported, documented type start offset.
@@ -378,7 +388,9 @@ func (e *emitter) markWritten(b block) { e.writtenDecl[b.start] = struct{}{} }
 
 func (e *emitter) writeConstructorsAndCluster(tn string) {
 	for _, name := range e.constructors[tn] {
-		e.writeFuncIfNotWritten(name)
+		if e.isCtorReady(name) {
+			e.writeFuncIfNotWritten(name)
+		}
 	}
 
 	methodList := e.methods[tn]
@@ -402,6 +414,26 @@ func (e *emitter) writeConstructorsAndCluster(tn string) {
 	for _, k := range ord {
 		e.writeFuncIfNotWritten(k)
 	}
+}
+
+// isCtorReady reports whether all types constructed by the constructor have
+// already had their type declarations emitted. This ensures that a constructor
+// returning multiple declared types appears after all of those types.
+func (e *emitter) isCtorReady(ctor string) bool {
+	types := e.ctorToTypes[ctor]
+	if len(types) == 0 {
+		return true
+	}
+	for _, tn := range types {
+		b, ok := e.a.typeDeclFor[tn]
+		if !ok {
+			continue
+		}
+		if !e.isWritten(b) {
+			return false
+		}
+	}
+	return true
 }
 
 // buildFirstCallerAdjacency creates adjacency and call sequence maps for a
