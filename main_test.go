@@ -220,6 +220,62 @@ func A() {}
 		}
 	})
 
+	// Regression for bug report: when run on examples/input.go, the doc comment
+	// for MoveOrWait() was duplicated. Ensure the documentation comment appears
+	// exactly once in the reordered output.
+	// We copy the relevant example content directly here as the input.
+	t.Run("moveorwait_doc_not_duplicated", func(t *testing.T) {
+		src := `package input
+
+// MoveOrWait maps directional and wait inputs into a movement vector and a
+// boolean indicating whether a turn should be consumed. If multiple
+// directions are pressed, horizontal takes precedence when both horizontal and
+// vertical are true, and left/right or up/down cancel each other out.
+func MoveOrWait(up, down, left, right, wait bool) (dx, dy int, turnTaken bool) {
+	// Resolve vertical
+	vy := 0
+	if up && !down {
+		vy = -1
+	} else if down && !up {
+		vy = 1
+	}
+
+	// Resolve horizontal
+	vx := 0
+	if left && !right {
+		vx = -1
+	} else if right && !left {
+		vx = 1
+	}
+
+	if vx != 0 || vy != 0 {
+		return vx, vy, true
+	}
+
+	if wait {
+		return 0, 0, true
+	}
+
+	return 0, 0, false
+}
+`
+
+		f := writeTempFile(t, "examples_input_like.go", src)
+		out := runTool(t, f)
+
+		outStr := string(out)
+		needle := "MoveOrWait maps directional and wait inputs"
+		occ := strings.Count(outStr, needle)
+		if occ != 1 {
+			t.Fatalf("expected exactly 1 occurrence of MoveOrWait doc comment, got %d.\nOutput:\n%s", occ, outStr)
+		}
+
+		// Also, ensure the function appears exactly once
+		if strings.Count(outStr, "func MoveOrWait(") != 1 {
+			t.Fatalf("expected exactly 1 MoveOrWait function decl; output:\n%s", outStr)
+		}
+	})
+
 	// Regression from examples/db.go: a method that returns a type declared in
 	// the same file (gidMountsMap) should not be pulled under that type's
 	// "users" section when it participates in an intra-receiver call chain.

@@ -101,8 +101,12 @@ func (res *analysisResult) collectDecls(fset *token.FileSet, file *ast.File) {
 		}
 
 		if fd, ok := decl.(*ast.FuncDecl); ok {
-			// handleFuncDecl returns possibly extended end accounting for inline comments
-			_, e = res.handleFuncDecl(fset, fd)
+			// handleFuncDecl returns adjusted start (to include doc comments)
+			// and possibly extended end accounting for inline comments. We
+			// must use both to ensure header detection excludes a func's doc
+			// from the header and avoids duplicating it when re-emitting.
+			fs, fe := res.handleFuncDecl(fset, fd)
+			s, e = fs, fe
 		}
 
 		if res.firstDeclStart == -1 || s < res.firstDeclStart {

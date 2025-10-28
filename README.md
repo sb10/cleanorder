@@ -112,3 +112,13 @@ Limitations (brief)
 These rules are intentionally conservative to avoid breaking code while
 improving readability by grouping related declarations and ensuring callers
 come before the functions they call.
+
+Comment handling
+
+- Doc comments (// or /* */) that are attached to a declaration are emitted
+  with that declaration. The tool ensures the file header (package/imports) is
+  split from the first declaration at the declaration's doc start to avoid
+  duplicating the doc text when reordering.
+- Inline trailing comments that appear on the same line as a declaration or a
+  function's closing brace (for example, //nolint) are preserved on that same
+  line in the output.
