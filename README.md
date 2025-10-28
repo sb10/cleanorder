@@ -51,6 +51,14 @@ High-level emission order
       - Additionally, const/var declarations that reference the type (e.g.,
         typed iota `const (...) SomeType = iota`) are emitted here with the type’s
         users, not in the early const/var section.
+      - Within the type’s users section, if a free function user calls private
+        helper functions, those helpers are packed immediately beneath that user
+        in the order they are first called (first-use order), provided doing so
+        does not violate caller-before-callee (i.e., a helper that is also called
+        by another not-yet-emitted function will not be moved prematurely). This
+        mirrors the helper packing used for method clusters and ensures examples
+        like Generate() are followed by chooseRoom, roomsIntersecting, carveRoom,
+        connectRooms in that order.
 
 - Any remaining `type` blocks that weren't emitted in the typed loop are
   written next.
@@ -92,6 +100,11 @@ Ordering constraints and algorithms
   additional predecessor constraints on that helper inside the cluster.
   Outside of clusters (e.g., among free functions), callers still precede
   their callees as before.
+  - The same "pack helpers beneath the first caller" idea is applied within a
+    type’s users section for free-function users (non-methods). After emitting a
+    user function, its private helpers are placed directly below it in the order
+    of first use when unconstrained by other callers, so the reader sees the
+    caller followed by its immediate building blocks.
   - Precedence: the callee-after-first-caller rule for a type's method cluster
     takes precedence over incidental standalone type declarations that happen
     to be referenced or returned by those methods. Such incidental types are

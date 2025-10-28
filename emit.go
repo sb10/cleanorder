@@ -743,6 +743,15 @@ func (e *emitter) writeUsersForType(tn string) {
 	uord = minimalReorderSubset(uord, 0, e.adj, e.callSeq)
 
 	uord = packWithinSubset(uord, 0, e.adj, e.callSeq)
+
+	// Build a quick set of users to avoid packing helpers that are themselves
+	// classified as users of this type (those will be emitted according to the
+	// user ordering we computed above).
+	userSet := map[string]struct{}{}
+	for _, u := range uord {
+		userSet[u] = struct{}{}
+	}
+
 	for _, k := range uord {
 		// If this user is a method and references an incidental type, ensure
 		// that type is emitted immediately before the method (kept adjacent).
@@ -755,7 +764,73 @@ func (e *emitter) writeUsersForType(tn string) {
 				}
 			}
 		}
+
+		// Write the user itself
 		e.writeFuncIfNotWritten(k)
+
+		// After writing a free-function user, pack its private helpers
+		// immediately beneath it in first-use order, provided doing so does
+		// not violate caller-before-callee (i.e., do not move a shared helper
+		// before another not-yet-written caller).
+		e.writeHelpersUnderCaller(k, userSet)
+	}
+}
+
+// writeHelpersUnderCaller packs and writes helper free functions called by
+// the given caller directly under it in first-use order, subject to the
+// constraint that a helper is only packed if all of its other callers (if any)
+// have already been written. This mirrors the callee-after-first-caller rule
+// used for method clusters, applied within a type's users section for free
+// functions like Generate().
+func (e *emitter) writeHelpersUnderCaller(caller string, userSet map[string]struct{}) {
+	// Only relevant when we have a call sequence for this caller
+	seq, ok := e.callSeq[caller]
+	if !ok || len(seq) == 0 {
+		return
+	}
+
+	// Filter to unique free-function callees that are not classified as users
+	// (we don't want to reorder other users here) and not already written.
+	seen := map[string]struct{}{}
+	for _, cal := range seq {
+		if _, s := seen[cal]; s {
+			continue
+		}
+		seen[cal] = struct{}{}
+
+		fb, ok := e.funcByKey[cal]
+		if !ok || fb.isMethod {
+			continue
+		}
+		if _, isUser := userSet[cal]; isUser {
+			// another user of the same type; leave it to user ordering
+			continue
+		}
+		if _, already := e.writtenFunc[cal]; already {
+			continue
+		}
+
+		// Ensure we don't move the helper above any other caller that hasn't
+		// been written yet. If there exists a caller P != caller and P is not
+		// yet written, defer packing this helper.
+		if otherCallers, ok := e.a.callersOf[cal]; ok {
+			blocked := false
+			for p := range otherCallers {
+				if p == caller {
+					continue
+				}
+				if _, done := e.writtenFunc[p]; !done {
+					blocked = true
+					break
+				}
+			}
+			if blocked {
+				continue
+			}
+		}
+
+		// Safe to emit directly under the caller now.
+		e.writeFuncIfNotWritten(cal)
 	}
 }
 

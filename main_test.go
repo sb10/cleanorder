@@ -220,6 +220,62 @@ func A() {}
 		}
 	})
 
+	// Bug report: in examples/generate.go, the private helpers of Generate()
+	// should appear in the caller's first-use order: chooseRoom, roomsIntersecting,
+	// carveRoom, connectRooms. Reproduce with a minimal snippet modelled on that file.
+	t.Run("dungeon_generate_helpers_order", func(t *testing.T) {
+		src := `package p
+
+type Params struct{ RoomAttempts, MinSize, MaxSize int }
+
+func applyDefaults(p Params) Params { return p }
+
+// Generate creates a level; calls helpers in order: chooseRoom, roomsIntersecting, carveRoom, connectRooms
+func Generate(width, height int, p Params) {
+    p = applyDefaults(p)
+    for i := 0; i < p.RoomAttempts; i++ {
+        _ = i
+        _ = width
+        _ = height
+        _ = p
+        _ = struct{}{}
+        room := chooseRoom(); _ = room
+        if roomsIntersecting() { continue }
+        carveRoom()
+        if i > 0 { connectRooms() }
+    }
+}
+
+// Helpers intentionally in a scrambled order to force reordering by the tool
+func carveRoom() {}
+func connectRooms() {}
+func chooseRoom() struct{} { return struct{}{} }
+func roomsIntersecting() bool { return false }
+`
+
+		f := writeTempFile(t, "dungeon_like_generate.go", src)
+		out := runTool(t, f)
+		order := declOrder(t, out)
+
+		genIdx := findIndex(order, "func Generate")
+		idxChoose := findIndex(order, "func chooseRoom")
+		idxInter := findIndex(order, "func roomsIntersecting")
+		idxCarve := findIndex(order, "func carveRoom")
+		idxConn := findIndex(order, "func connectRooms")
+
+		need := map[string]int{"Generate": genIdx, "chooseRoom": idxChoose, "roomsIntersecting": idxInter, "carveRoom": idxCarve, "connectRooms": idxConn}
+		for name, idx := range need {
+			if idx == -1 {
+				t.Fatalf("missing %s in output order: %v", name, order)
+			}
+		}
+
+		// Expect helpers packed immediately beneath Generate in first-call order.
+		if !(idxChoose == genIdx+1 && idxInter == idxChoose+1 && idxCarve == idxInter+1 && idxConn == idxCarve+1) {
+			t.Fatalf("helpers not packed under Generate in first-use order (chooseRoom, roomsIntersecting, carveRoom, connectRooms): %v", order)
+		}
+	})
+
 	// When a constructor returns two types declared in the same file, both type
 	// declarations must appear before the constructor. The constructor should not
 	// be emitted after only the first type.
