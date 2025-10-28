@@ -220,6 +220,63 @@ func A() {}
 		}
 	})
 
+	// Regression: nested helper packing for free-function users. When a user
+	// function emits a helper that itself calls other helpers, we should pack
+	// those nested helpers depth-first in first-use order, anchoring under the
+	// first caller even if another sibling later also calls the nested helper.
+	// Expect order: Connect, H, Line, V (callee-after-first-caller for Line).
+	t.Run("nested_helpers_depth_first_under_user", func(t *testing.T) {
+		src := `package p
+
+// anchor type so the user function is classified as a user of the type
+type Params struct{}
+
+// user references Params (in signature) and calls Connect
+func Generate(p Params) { Connect() }
+
+// helper under the user
+func Connect() { H(); V() }
+
+// sibling helpers that both call Line
+func H() { Line() }
+func V() { Line() }
+
+// shared callee; should be anchored under H (first caller) rather than V
+func Line() {}
+`
+
+		f := writeTempFile(t, "nested_helpers_like.go", src)
+		out := runTool(t, f)
+		order := declOrder(t, out)
+
+		idxGen := findIndex(order, "func Generate")
+		idxConn := findIndex(order, "func Connect")
+		idxH := findIndex(order, "func H")
+		idxLine := findIndex(order, "func Line")
+		idxV := findIndex(order, "func V")
+
+		need := map[string]int{"Generate": idxGen, "Connect": idxConn, "H": idxH, "Line": idxLine, "V": idxV}
+		for name, idx := range need {
+			if idx == -1 {
+				t.Fatalf("missing %s in output order: %v", name, order)
+			}
+		}
+
+		// Ensure depth-first packing under Connect: H, then Line (its helper), then V
+		if !(idxConn == idxGen+1) {
+			t.Fatalf("Connect should be immediately after Generate: %v", order)
+		}
+		if !(idxH == idxConn+1) {
+			t.Fatalf("H should be immediately after Connect: %v", order)
+		}
+		if !(idxLine == idxH+1) {
+			t.Fatalf("Line should be immediately after H: %v", order)
+		}
+		if !(idxV == idxLine+1) {
+			t.Fatalf("V should be immediately after Line: %v", order)
+		}
+	})
+
 	// Bug report: in examples/generate.go, the private helpers of Generate()
 	// should appear in the caller's first-use order: chooseRoom, roomsIntersecting,
 	// carveRoom, connectRooms. Reproduce with a minimal snippet modelled on that file.

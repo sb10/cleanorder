@@ -53,12 +53,13 @@ High-level emission order
         users, not in the early const/var section.
       - Within the type’s users section, if a free function user calls private
         helper functions, those helpers are packed immediately beneath that user
-        in the order they are first called (first-use order), provided doing so
-        does not violate caller-before-callee (i.e., a helper that is also called
-        by another not-yet-emitted function will not be moved prematurely). This
-        mirrors the helper packing used for method clusters and ensures examples
-        like Generate() are followed by chooseRoom, roomsIntersecting, carveRoom,
-        connectRooms in that order.
+        in the order they are first called (first-use order). This mirrors the
+        helper packing used for method clusters: a helper anchored under its
+        first caller is not forced further down by later callers. This ensures
+        examples like Generate() are followed by chooseRoom, roomsIntersecting,
+        carveRoom, connectRooms in that order, and that nested helpers (e.g.,
+        carveHorizontal/Vertical calling carveLine) are packed depth-first under
+        the first caller (carveHorizontal, carveLine, carveVertical).
 
 - Any remaining `type` blocks that weren't emitted in the typed loop are
   written next.
@@ -103,8 +104,10 @@ Ordering constraints and algorithms
   - The same "pack helpers beneath the first caller" idea is applied within a
     type’s users section for free-function users (non-methods). After emitting a
     user function, its private helpers are placed directly below it in the order
-    of first use when unconstrained by other callers, so the reader sees the
-    caller followed by its immediate building blocks.
+    of first use (callee-after-first-caller). This may place a shared helper
+    above later callers of that helper; that’s acceptable and preferred for
+    readability. When truly impossible due to other constraints, the tool
+    falls back to placing the helper after the blocking declarations.
   - Precedence: the callee-after-first-caller rule for a type's method cluster
     takes precedence over incidental standalone type declarations that happen
     to be referenced or returned by those methods. Such incidental types are

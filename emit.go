@@ -783,55 +783,49 @@ func (e *emitter) writeUsersForType(tn string) {
 // used for method clusters, applied within a type's users section for free
 // functions like Generate().
 func (e *emitter) writeHelpersUnderCaller(caller string, userSet map[string]struct{}) {
-	// Only relevant when we have a call sequence for this caller
-	seq, ok := e.callSeq[caller]
-	if !ok || len(seq) == 0 {
-		return
-	}
-
-	// Filter to unique free-function callees that are not classified as users
-	// (we don't want to reorder other users here) and not already written.
-	seen := map[string]struct{}{}
-	for _, cal := range seq {
-		if _, s := seen[cal]; s {
-			continue
+	// Depth-first packing of helper subtrees under the given caller in
+	// first-use order. We intentionally prefer callee-after-first-caller:
+	// once a helper is placed under this caller, later callers do not force
+	// the helper to move further down. This mirrors method cluster behaviour.
+	visited := map[string]struct{}{}
+	var pack func(string)
+	pack = func(curCaller string) {
+		seq, ok := e.callSeq[curCaller]
+		if !ok || len(seq) == 0 {
+			return
 		}
-		seen[cal] = struct{}{}
-
-		fb, ok := e.funcByKey[cal]
-		if !ok || fb.isMethod {
-			continue
-		}
-		if _, isUser := userSet[cal]; isUser {
-			// another user of the same type; leave it to user ordering
-			continue
-		}
-		if _, already := e.writtenFunc[cal]; already {
-			continue
-		}
-
-		// Ensure we don't move the helper above any other caller that hasn't
-		// been written yet. If there exists a caller P != caller and P is not
-		// yet written, defer packing this helper.
-		if otherCallers, ok := e.a.callersOf[cal]; ok {
-			blocked := false
-			for p := range otherCallers {
-				if p == caller {
-					continue
-				}
-				if _, done := e.writtenFunc[p]; !done {
-					blocked = true
-					break
-				}
-			}
-			if blocked {
+		seenThis := map[string]struct{}{}
+		for _, cal := range seq {
+			if _, s := seenThis[cal]; s {
 				continue
 			}
-		}
+			seenThis[cal] = struct{}{}
 
-		// Safe to emit directly under the caller now.
-		e.writeFuncIfNotWritten(cal)
+			fb, ok := e.funcByKey[cal]
+			if !ok || fb.isMethod {
+				continue
+			}
+			if _, isUser := userSet[cal]; isUser {
+				// another user of the same type; leave it to user ordering
+				continue
+			}
+			if _, already := e.writtenFunc[cal]; already {
+				continue
+			}
+			if _, seen := visited[cal]; seen {
+				continue
+			}
+
+			// Emit helper directly under curCaller
+			e.writeFuncIfNotWritten(cal)
+			visited[cal] = struct{}{}
+
+			// Recursively pack helpers of this helper
+			pack(cal)
+		}
 	}
+
+	pack(caller)
 }
 
 func (e *emitter) writeRemainingFuncs() {
