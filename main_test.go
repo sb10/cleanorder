@@ -1154,6 +1154,164 @@ func handleError(w http.ResponseWriter, err error) {
 		}
 	})
 
+	// Regression for bug report: examples/level.go got corrupted with the
+	// TileType declaration being munged together with its typed const block.
+	// Ensure the tool outputs a valid separation where the type appears before
+	// the const block, and no concatenation like "type TileType intconst (" occurs.
+	t.Run("level_tiletype_and_typed_consts_separated_and_ordered", func(t *testing.T) {
+		src := `package model
+
+const (
+	Wall TileType = iota
+	Floor
+)
+
+// TileType represents the logical tile kind.
+// Values are kept stable to mirror the legacy code expectations when needed.
+type TileType int
+
+// Tile is a logical, render-agnostic tile.
+type Tile struct {
+	Blocked    bool
+	IsRevealed bool
+	Type       TileType
+}
+
+// Level is a logical dungeon map with inclusive coordinate bounds: [0..Width-1] x [0..Height-1].
+type Level struct {
+	Width  int
+	Height int
+	Tiles  []Tile
+	Rooms  []Rect
+}
+
+// NewLevel allocates a blank level filled with walls.
+func NewLevel(width, height int) Level {
+	l := Level{Width: width, Height: height, Tiles: make([]Tile, width*height)}
+	for i := range l.Tiles {
+		l.Tiles[i] = Tile{Blocked: true, Type: Wall}
+	}
+
+	return l
+}
+
+// Index computes the linear index; caller must pass in-bounds x,y.
+func (l Level) Index(x, y int) int { return y*l.Width + x }
+
+// InBounds reports whether x,y are within [0..Width-1] x [0..Height-1].
+func (l Level) InBounds(x, y int) bool {
+	return x >= 0 && x < l.Width && y >= 0 && y < l.Height
+}
+`
+
+		f := writeTempFile(t, "level_like.go", src)
+		out := runTool(t, f)
+		outStr := string(out)
+
+		// Must not concatenate type and const tokens
+		if strings.Contains(outStr, "type TileType intconst") {
+			t.Fatalf("type and const concatenated; output invalid. Output:\n%s", outStr)
+		}
+
+		// Parse and assert ordering: type TileType must come before const Wall
+		order := declOrder(t, out)
+		typeIdx := findIndex(order, "type TileType")
+		constIdx := findIndex(order, "const Wall")
+		if typeIdx == -1 || constIdx == -1 {
+			t.Fatalf("missing type or const decls in output order: %v", order)
+		}
+		if !(typeIdx < constIdx) {
+			t.Fatalf("type TileType should appear before its typed const block: %v", order)
+		}
+	})
+
+	// Regression for bug report: examples/dir.go lost a large portion of its
+	// code after reordering (methods disappeared). This test ensures that:
+	//   1) key methods on Dir (Opposite, Apply, Delta) are preserved in output
+	//   2) we don't delete lines: the count of non-blank lines before and after
+	//      reordering is identical.
+	t.Run("dir_methods_preserved_and_linecount_guard", func(t *testing.T) {
+		src := `package model
+
+// DirectionsURDL is the canonical neighbor iteration order used by rules that
+// need 4-connected movement on a grid: Up, Right, Down, Left. Using a shared
+// definition keeps pathfinding and other systems deterministic.
+var DirectionsURDL = [...]Dir{Up, Right, Down, Left}
+
+const (
+	Up Dir = iota
+	Right
+	Down
+	Left
+)
+
+// Dir represents a cardinal direction.
+type Dir int
+
+// Opposite returns the opposite cardinal direction.
+func (d Dir) Opposite() Dir {
+	switch d {
+	case Up:
+		return Down
+	case Right:
+		return Left
+	case Down:
+		return Up
+	case Left:
+		return Right
+	default:
+		return d
+	}
+}
+
+// Apply returns a new Position translated by this direction's unit delta.
+func (d Dir) Apply(p Position) Position {
+	dx, dy := d.Delta()
+
+	return p.Add(dx, dy)
+}
+
+// Delta returns the (dx, dy) unit step for the direction.
+func (d Dir) Delta() (int, int) {
+	switch d {
+	case Up:
+		return 0, -1
+	case Right:
+		return 1, 0
+	case Down:
+		return 0, 1
+	case Left:
+		return -1, 0
+	default:
+		return 0, 0
+	}
+}
+`
+
+		f := writeTempFile(t, "dir_like.go", src)
+		beforeNonBlank := countNonBlankLines(src)
+		out := runTool(t, f)
+		outStr := string(out)
+		afterNonBlank := countNonBlankLines(outStr)
+
+		// Presence checks for methods
+		need := []string{
+			"func (d Dir) Opposite() Dir",
+			"func (d Dir) Apply(",
+			"func (d Dir) Delta() (int, int)",
+		}
+		for _, n := range need {
+			if !strings.Contains(outStr, n) {
+				t.Fatalf("missing expected method %q in output. Output:\n%s", n, outStr)
+			}
+		}
+
+		// Non-blank line count must remain the same
+		if beforeNonBlank != afterNonBlank {
+			t.Fatalf("non-blank line count changed: before=%d after=%d", beforeNonBlank, afterNonBlank)
+		}
+	})
+
 	t.Run("multiple_constructors_ordered_after_type", func(t *testing.T) {
 		// constructors should appear after the type and preserve their original
 		// appearance order relative to each other.
@@ -1413,6 +1571,17 @@ func writeTempFile(t *testing.T, name, content string) string {
 	}
 
 	return p
+}
+
+// countNonBlankLines counts lines that contain any non-whitespace character.
+func countNonBlankLines(s string) int {
+	n := 0
+	for _, ln := range strings.Split(s, "\n") {
+		if strings.TrimSpace(ln) != "" {
+			n++
+		}
+	}
+	return n
 }
 
 // runToolNoDry runs the current tool (non-dry) on the given target. It runs

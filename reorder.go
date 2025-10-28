@@ -47,11 +47,47 @@ func buildReordered(filename string, src []byte) ([]byte, error) {
 	}
 
 	out := buildOutput(a)
+	candidate := out
 	if formatted, ferr := format.Source(out); ferr == nil {
-		return formatted, nil
+		candidate = formatted
 	}
 
-	return out, nil
+	// Guard: ensure we never reduce the number of non-blank lines. If the
+	// candidate output has fewer non-blank lines than the original source,
+	// fall back to the original content to avoid accidental deletion.
+	if nonBlankLineCount(candidate) < nonBlankLineCount(src) {
+		candidate = formatMaybe(src)
+	}
+
+	return candidate, nil
+}
+
+// nonBlankLineCount counts lines with non-whitespace content.
+func nonBlankLineCount(b []byte) int {
+	count := 0
+	start := 0
+	for start <= len(b) {
+		end := start
+		for end < len(b) && b[end] != '\n' {
+			end++
+		}
+		// trim spaces and tabs; treat pure whitespace as blank
+		lineHasNonSpace := false
+		for i := start; i < end; i++ {
+			if b[i] != ' ' && b[i] != '\t' && b[i] != '\r' {
+				lineHasNonSpace = true
+				break
+			}
+		}
+		if lineHasNonSpace {
+			count++
+		}
+		if end == len(b) {
+			break
+		}
+		start = end + 1
+	}
+	return count
 }
 
 // writeDry writes output bytes to stdout and ensures a trailing newline.

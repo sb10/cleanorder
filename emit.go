@@ -189,6 +189,7 @@ func (e *emitter) writeConstVar() {
 			e.writeNL()
 		}
 		e.out.Write(e.src[b.start:b.end])
+		e.markWritten(b)
 		outCount++
 	}
 
@@ -205,6 +206,16 @@ func (e *emitter) writeConstVar() {
 					e.writeDeclIfNeeded(tb)
 				}
 			}
+		}
+
+		// Ensure a separator before the typed const/var block when it follows a
+		// freshly-emitted type declaration. The writeBlock helper only inserts a
+		// separator when at least one prior const/var block has been written via
+		// this function (outCount>0). When we just emitted a type above and this
+		// is the first const/var block, we need to explicitly ensure separation to
+		// avoid gluing tokens like "type T intconst (".
+		if outCount == 0 {
+			e.writeNL()
 		}
 		writeBlock(b)
 	}
@@ -241,10 +252,12 @@ func (e *emitter) emitTypeWithDeps(tn string, visited map[string]bool) {
 	if !ok {
 		return
 	}
-	if e.isWritten(b) {
-		return
-	}
 
+	// Always process the type to ensure its constructors/methods/users are
+	// emitted, even if the type declaration itself has already been written
+	// earlier (e.g., to satisfy a typed const block dependency). processType
+	// internally checks and avoids re-emitting the type declaration when it
+	// has been written, but still emits the associated functions.
 	e.processType(tn, b)
 }
 
