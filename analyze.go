@@ -41,31 +41,38 @@ type analysisResult struct {
 	// methods on receivers not declared in this file. These should be emitted
 	// immediately before their first user instead of in the type section.
 	incidentalTypes map[string]struct{}
+	// const/var blocks that reference a declared type (e.g., typed iota constants
+	// like `AttackRolled Kind = iota`) are treated as users of that type and are
+	// emitted with the type's users rather than in the global const/var section.
+	constVarUsers    map[string][]block
+	deferredConstVar map[int]struct{}
 }
 
 func newAnalysisResult(fset *token.FileSet, src []byte, file *ast.File) *analysisResult {
 	return &analysisResult{
-		fset:            fset,
-		src:             src,
-		file:            file,
-		constVar:        []block{},
-		typeBlocks:      []block{},
-		typeNames:       []string{},
-		typeDeclFor:     map[string]block{},
-		typeHasDoc:      map[string]bool{},
-		funcBlocks:      []funcBlock{},
-		funcByKey:       map[string]funcBlock{},
-		firstDeclStart:  -1,
-		lastImportEnd:   -1,
-		lastDeclEnd:     -1,
-		adj:             map[string]map[string]struct{}{},
-		callersOf:       map[string]map[string]struct{}{},
-		callSeq:         map[string][]string{},
-		constructors:    map[string][]string{},
-		methods:         map[string][]string{},
-		helpers:         map[string]map[string]struct{}{},
-		users:           map[string]map[string]struct{}{},
-		incidentalTypes: map[string]struct{}{},
+		fset:             fset,
+		src:              src,
+		file:             file,
+		constVar:         []block{},
+		typeBlocks:       []block{},
+		typeNames:        []string{},
+		typeDeclFor:      map[string]block{},
+		typeHasDoc:       map[string]bool{},
+		funcBlocks:       []funcBlock{},
+		funcByKey:        map[string]funcBlock{},
+		firstDeclStart:   -1,
+		lastImportEnd:    -1,
+		lastDeclEnd:      -1,
+		adj:              map[string]map[string]struct{}{},
+		callersOf:        map[string]map[string]struct{}{},
+		callSeq:          map[string][]string{},
+		constructors:     map[string][]string{},
+		methods:          map[string][]string{},
+		helpers:          map[string]map[string]struct{}{},
+		users:            map[string]map[string]struct{}{},
+		incidentalTypes:  map[string]struct{}{},
+		constVarUsers:    map[string][]block{},
+		deferredConstVar: map[int]struct{}{},
 	}
 }
 
@@ -406,6 +413,63 @@ func (res *analysisResult) classify() {
 	res.computeUsers(typeSet)
 	res.computeIndependent()
 	res.computeIncidentalTypes(typeSet)
+	res.computeConstVarUsers(typeSet)
+}
+
+// computeConstVarUsers identifies const/var GenDecls whose declared types reference
+// any type declared in this file. Such blocks are treated as "users" of those types
+// and emitted with the type's users instead of the top-level const/var section.
+// We conservatively look only at the explicit Type on each ValueSpec.
+//
+//nolint:gocognit
+func (res *analysisResult) computeConstVarUsers(typeSet map[string]struct{}) {
+	if len(typeSet) == 0 {
+		return
+	}
+
+	for _, decl := range res.file.Decls {
+		gd, ok := decl.(*ast.GenDecl)
+		if !ok {
+			continue
+		}
+		if gd.Tok != token.CONST && gd.Tok != token.VAR {
+			continue
+		}
+
+		// Compute adjusted block span consistent with recordGenDecl
+		s := res.adjustDeclStartForDoc(res.fset, gd, res.fset.Position(gd.Pos()).Offset)
+		e := res.extendEndForInlineComments(res.fset, gd, res.fset.Position(gd.End()).Offset)
+		b := block{start: s, end: e}
+
+		// Determine which declared types are referenced by this const/var block
+		referenced := map[string]struct{}{}
+		for _, sp := range gd.Specs {
+			vs, ok := sp.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			if vs.Type == nil {
+				continue // only handle explicitly-typed specs
+			}
+			for tn := range typeSet {
+				if typeContains(vs.Type, tn) {
+					referenced[tn] = struct{}{}
+				}
+			}
+		}
+
+		if len(referenced) == 0 {
+			continue
+		}
+
+		// Mark this const/var block as deferred from the global section
+		res.deferredConstVar[b.start] = struct{}{}
+
+		// Associate this block with all referenced types
+		for tn := range referenced {
+			res.constVarUsers[tn] = append(res.constVarUsers[tn], b)
+		}
+	}
 }
 
 func (res *analysisResult) computeTypeSet() map[string]struct{} {

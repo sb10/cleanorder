@@ -153,6 +153,10 @@ func (e *emitter) writeConstVar() {
 	e.writeNL()
 
 	for i, b := range e.a.constVar {
+		// Skip const/var blocks that are deferred to be emitted as users of a type
+		if _, deferThis := e.a.deferredConstVar[b.start]; deferThis {
+			continue
+		}
 		if i > 0 {
 			e.writeNL()
 		}
@@ -164,23 +168,72 @@ func (e *emitter) writeConstVar() {
 }
 
 func (e *emitter) writeTypes() {
+	visited := map[string]bool{}
 	for _, tn := range e.a.typeNames {
-		b, ok := e.a.typeDeclFor[tn]
-		if !ok {
-			continue
-		}
-
-		// Skip incidental types here; they will be emitted immediately before
-		// their first user to avoid breaking method grouping on other types.
-		if _, inc := e.a.incidentalTypes[tn]; inc {
-			// Fully defer: neither the type nor its users are emitted here.
-			// The declaration will be inlined immediately before the first
-			// user in writeRemainingFuncs.
-			continue
-		}
-
-		e.processType(tn, b)
+		e.emitTypeWithDeps(tn, visited)
 	}
+}
+
+// emitTypeWithDeps ensures that any not-yet-emitted types used by the methods of tn
+// are emitted before tn to satisfy the precedence "types before users" across receiver types.
+func (e *emitter) emitTypeWithDeps(tn string, visited map[string]bool) {
+	if visited[tn] {
+		return
+	}
+	visited[tn] = true
+
+	// Skip incidental types here; they will be emitted inline before the first user.
+	if _, inc := e.a.incidentalTypes[tn]; inc {
+		return
+	}
+
+	// Emit dependency types first
+	for dep := range e.typeDeps(tn) {
+		e.emitTypeWithDeps(dep, visited)
+	}
+
+	b, ok := e.a.typeDeclFor[tn]
+	if !ok {
+		return
+	}
+	if e.isWritten(b) {
+		return
+	}
+
+	e.processType(tn, b)
+}
+
+// typeDeps returns the set of types referenced by methods of tn (as recorded in users)
+// that should be emitted before tn to ensure the referenced types precede their users.
+func (e *emitter) typeDeps(tn string) map[string]struct{} {
+	deps := map[string]struct{}{}
+
+	mset := map[string]struct{}{}
+	for _, m := range e.methods[tn] {
+		mset[m] = struct{}{}
+	}
+	if len(mset) == 0 {
+		return deps
+	}
+
+	for other := range e.a.typeDeclFor {
+		if other == tn {
+			continue
+		}
+		// Skip incidental types; they will be inlined near first user.
+		if _, inc := e.a.incidentalTypes[other]; inc {
+			continue
+		}
+		// If any method of tn is a recorded user of 'other', then 'other' is a dep
+		for m := range mset {
+			if _, ok := e.users[other][m]; ok {
+				deps[other] = struct{}{}
+				break
+			}
+		}
+	}
+
+	return deps
 }
 
 func (e *emitter) processType(tn string, b block) {
@@ -199,8 +252,24 @@ func (e *emitter) processType(tn string, b block) {
 	if hasCtors || hasMethods {
 		e.writeConstructorsAndCluster(tn)
 	}
+	// Emit any const/var blocks that reference this type before function users
+	e.writeConstVarUsersForType(tn)
 	e.writeUsersForType(tn)
 	e.writeNL()
+}
+
+// writeConstVarUsersForType emits deferred const/var blocks that reference tn.
+func (e *emitter) writeConstVarUsersForType(tn string) {
+	blks := e.a.constVarUsers[tn]
+	if len(blks) == 0 {
+		return
+	}
+	// Preserve original order
+	for _, b := range blks {
+		if !e.isWritten(b) {
+			e.writeDeclIfNeeded(b)
+		}
+	}
 }
 
 func (e *emitter) writeTypeBlocks() {

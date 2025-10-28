@@ -220,6 +220,63 @@ func A() {}
 		}
 	})
 
+	// Regression from examples/combat.go: ensure types come before their users,
+	// including (1) typed const iota block using a declared type, and (2) a method
+	// on a different receiver type that returns/mentions a declared type.
+	// The tool should emit:
+	//   - type Kind before the const (AttackRolled Kind = iota)
+	//   - type Summary before method Events.Summary
+	// We inline a minimal snippet capturing just the ordering relationships.
+	t.Run("combat_types_before_users_and_typed_consts", func(t *testing.T) {
+		src := `package p
+
+// Receiver type whose method references Summary below
+type Events []Event
+
+// Method that returns Summary; in the original example this appeared before the Summary type.
+func (ev Events) Summary() Summary { return Summary{} }
+
+// A typed iota constant block that uses Kind
+const (
+    AttackRolled Kind = iota
+    DamageRolled
+)
+
+// The type that must precede the above const block
+type Kind int
+
+// A basic Event to satisfy Events element type (not important for ordering test)
+type Event struct{ K Kind }
+
+// The type that should appear before Events.Summary
+type Summary struct{ Hit bool }
+`
+
+		f := writeTempFile(t, "combat_like.go", src)
+		out := runTool(t, f)
+		order := declOrder(t, out)
+
+		idxKind := findIndex(order, "type Kind")
+		idxConst := findIndex(order, "const AttackRolled")
+		idxSummaryType := findIndex(order, "type Summary")
+		idxSummaryMethod := findIndex(order, "method Events.Summary")
+
+		need := map[string]int{"type Kind": idxKind, "const AttackRolled": idxConst, "type Summary": idxSummaryType, "method Events.Summary": idxSummaryMethod}
+		for name, idx := range need {
+			if idx == -1 {
+				t.Fatalf("missing %s in output order: %v", name, order)
+			}
+		}
+
+		if !(idxKind < idxConst) {
+			t.Fatalf("type Kind should appear before its typed const block: %v", order)
+		}
+
+		if !(idxSummaryType < idxSummaryMethod) {
+			t.Fatalf("type Summary should appear before Events.Summary method: %v", order)
+		}
+	})
+
 	// Regression for bug report: when run on examples/input.go, the doc comment
 	// for MoveOrWait() was duplicated. Ensure the documentation comment appears
 	// exactly once in the reordered output.

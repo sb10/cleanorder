@@ -17,7 +17,12 @@ High-level emission order
 
 - Package header, imports and file-level comments are preserved at the top.
 - All `const`/`var` declaration blocks are emitted next, in original order,
-  separated by blank lines.
+  separated by blank lines, except when a declaration explicitly references a
+  type declared in the same file (for example, typed iota constants like
+  `AttackRolled Kind = iota` or `var x SomeType`). Such declarations are
+  treated as users of that type and are emitted with that type’s users instead
+  of in the global const/var section. This enforces the precedence that types
+  come before their users.
 - "Independent" free functions (non-methods that have no calls to or from
   other functions in the file and are not constructors named `New*`) are
   emitted next in their original order.
@@ -34,10 +39,13 @@ High-level emission order
 	generic "user" of any types it happens to reference. This prevents helpers
 	(e.g., readBody/handleError used by ServeHTTP) from being emitted before
 	their first caller in another type’s user section.
-  - Emit functions and methods that "use" the type (any function or method
-    that references the type in a signature/body or calls the type's
-    constructors/methods). If the type has no constructors or methods, its
-    users are still emitted immediately after the type declaration.
+  - Emit functions and methods that "use" the type (any function or method that
+      references the type in a signature/body or calls the type's
+      constructors/methods). If the type has no constructors or methods, its
+      users are still emitted immediately after the type declaration.
+      - Additionally, const/var declarations that reference the type (e.g.,
+        typed iota `const (...) SomeType = iota`) are emitted here with the type’s
+        users, not in the early const/var section.
 
 - Any remaining `type` blocks that weren't emitted in the typed loop are
   written next.
@@ -84,6 +92,14 @@ Ordering constraints and algorithms
     to be referenced or returned by those methods. Such incidental types are
     inlined immediately above the first using method and do not form their own
     user section.
+  - Type-before-users precedence (raised): a type’s declaration must appear
+    before any declarations that use it, including methods on other receiver
+    types. When necessary, this can cause types to be emitted earlier than
+    their original source order so that the type precedes methods that return
+    or reference it (e.g., a `Summary` type will be emitted before an
+    `Events.Summary()` method that returns it). Const/var declarations that
+    reference the type are likewise treated as users and emitted after the
+    type rather than in the global const/var section.
 - Call sequencing: if a function calls A then B in that order, the tool
   records that sequence and prefers to keep A before B when both are in the
   reordering subset.
