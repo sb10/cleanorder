@@ -220,6 +220,43 @@ func A() {}
 		}
 	})
 
+	// Bug report reproducer: a type used by another type's declaration must be
+	// declared before its user. In examples/monster_phase.go, MonsterOutcome has a
+	// field of type []AttackDetail, but AttackDetail was declared below it. The
+	// tool should reorder so that AttackDetail appears immediately above
+	// MonsterOutcome.
+	t.Run("type_used_in_type_decl_precedes_user", func(t *testing.T) {
+		src := `package p
+
+// MonsterOutcome summarizes outcomes and uses AttackDetail in its fields
+type MonsterOutcome struct {
+    Details []AttackDetail
+}
+
+// Declared after its user in source; tool should move it above
+type AttackDetail struct{ Hit bool }
+`
+
+		f := writeTempFile(t, "monster_phase_like.go", src)
+		out := runTool(t, f)
+		order := declOrder(t, out)
+
+		idxUser := findIndex(order, "type MonsterOutcome")
+		idxDep := findIndex(order, "type AttackDetail")
+
+		if idxUser == -1 || idxDep == -1 {
+			t.Fatalf("missing expected type decls in output: %v", order)
+		}
+
+		if !(idxDep < idxUser) {
+			t.Fatalf("AttackDetail type should appear before MonsterOutcome that uses it: %v", order)
+		}
+
+		if idxUser-idxDep != 1 {
+			t.Fatalf("AttackDetail should be immediately above MonsterOutcome: %v", order)
+		}
+	})
+
 	// Regression: nested helper packing for free-function users. When a user
 	// function emits a helper that itself calls other helpers, we should pack
 	// those nested helpers depth-first in first-use order, anchoring under the

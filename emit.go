@@ -374,24 +374,35 @@ func (e *emitter) typeDeps(tn string) map[string]struct{} {
 	for _, m := range e.methods[tn] {
 		mset[m] = struct{}{}
 	}
-	if len(mset) == 0 {
-		return deps
+	// Method-based dependencies: if any method of tn is a recorded user of 'other',
+	// then 'other' must be emitted before tn.
+	if len(mset) > 0 {
+		for other := range e.a.typeDeclFor {
+			if other == tn {
+				continue
+			}
+			// Skip incidental types; they will be inlined near first user.
+			if _, inc := e.a.incidentalTypes[other]; inc {
+				continue
+			}
+			for m := range mset {
+				if _, ok := e.users[other][m]; ok {
+					deps[other] = struct{}{}
+					break
+				}
+			}
+		}
 	}
 
-	for other := range e.a.typeDeclFor {
-		if other == tn {
-			continue
-		}
-		// Skip incidental types; they will be inlined near first user.
-		if _, inc := e.a.incidentalTypes[other]; inc {
-			continue
-		}
-		// If any method of tn is a recorded user of 'other', then 'other' is a dep
-		for m := range mset {
-			if _, ok := e.users[other][m]; ok {
-				deps[other] = struct{}{}
-				break
+	// Declaration-based dependencies: if tn's declaration mentions another
+	// declared type, that type must precede tn.
+	if dset, ok := e.a.typeDeclDeps[tn]; ok {
+		for other := range dset {
+			// Skip incidental types; they will be inlined near first user.
+			if _, inc := e.a.incidentalTypes[other]; inc {
+				continue
 			}
+			deps[other] = struct{}{}
 		}
 	}
 

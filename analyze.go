@@ -39,6 +39,12 @@ type analysisResult struct {
 	helpers      map[string]map[string]struct{}
 	users        map[string]map[string]struct{}
 	independent  []string
+	// typeDeclDeps records, for each declared type in this file, the set of
+	// other declared types that are referenced directly in its own type
+	// declaration (e.g., struct field types, embedded types, interfaces, etc.).
+	// These dependencies ensure that when a type refers to another type in its
+	// declaration, the referenced type is emitted before the referring type.
+	typeDeclDeps map[string]map[string]struct{}
 	// incidentalTypes: types with no constructors/methods whose only users are
 	// methods on receivers not declared in this file. These should be emitted
 	// immediately before their first user instead of in the type section.
@@ -76,6 +82,7 @@ func newAnalysisResult(fset *token.FileSet, src []byte, file *ast.File) *analysi
 		incidentalTypes:  map[string]struct{}{},
 		constVarUsers:    map[string][]block{},
 		deferredConstVar: map[int]struct{}{},
+		typeDeclDeps:     map[string]map[string]struct{}{},
 	}
 }
 
@@ -433,6 +440,7 @@ func (res *analysisResult) buildSeqForCaller(caller string, callFirstPos callFir
 func (res *analysisResult) classify() {
 	typeSet := res.computeTypeSet()
 	res.initTypeMaps(typeSet)
+	res.computeTypeDeclDeps(typeSet)
 	res.findConstructors(typeSet)
 	res.findMethods(typeSet)
 	res.computeHelpers()
@@ -440,6 +448,49 @@ func (res *analysisResult) classify() {
 	res.computeIndependent()
 	res.computeIncidentalTypes(typeSet)
 	res.computeConstVarUsers(typeSet)
+}
+
+// computeTypeDeclDeps populates typeDeclDeps with references found in type
+// declarations: if type T's declaration mentions type U (where U is also
+// declared in this file), then T depends on U and U should be emitted before T.
+//
+// This captures relationships like:
+//
+//	type MonsterOutcome struct{ Details []AttackDetail }
+//
+// which requires AttackDetail to be emitted before MonsterOutcome.
+func (res *analysisResult) computeTypeDeclDeps(typeSet map[string]struct{}) {
+	if len(typeSet) == 0 {
+		return
+	}
+	// Build a quick map from type name to its TypeSpec for scanning.
+	for _, decl := range res.file.Decls {
+		gd, ok := decl.(*ast.GenDecl)
+		if !ok || gd.Tok != token.TYPE {
+			continue
+		}
+		for _, sp := range gd.Specs {
+			ts, ok := sp.(*ast.TypeSpec)
+			if !ok || ts.Type == nil {
+				continue
+			}
+			tname := ts.Name.Name
+			// Collect all identifier names mentioned in the type expression
+			idents := map[string]struct{}{}
+			collectIdentsInType(ts.Type, idents)
+			for ref := range idents {
+				if ref == tname {
+					continue
+				}
+				if _, ok := typeSet[ref]; ok {
+					if _, ok := res.typeDeclDeps[tname]; !ok {
+						res.typeDeclDeps[tname] = map[string]struct{}{}
+					}
+					res.typeDeclDeps[tname][ref] = struct{}{}
+				}
+			}
+		}
+	}
 }
 
 // computeConstVarUsers identifies const/var GenDecls whose declared types reference

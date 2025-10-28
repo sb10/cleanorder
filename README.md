@@ -115,7 +115,9 @@ Ordering constraints and algorithms
     user section.
   - Type-before-users precedence (raised): a type’s declaration must appear
     before any declarations that use it, including methods on other receiver
-    types. When necessary, this can cause types to be emitted earlier than
+    types and other type declarations that reference it in their own
+    definitions (for example, a struct field typed as []AttackDetail). When
+    necessary, this can cause types to be emitted earlier than
     their original source order so that the type precedes methods that return
     or reference it (e.g., a `Summary` type will be emitted before an
     `Events.Summary()` method that returns it). Const/var declarations that
