@@ -28,6 +28,8 @@ type emitter struct {
 	writtenFunc map[string]struct{}
 	// Reverse index of constructor function name -> types it constructs.
 	ctorToTypes map[string][]string
+	// For const/var blocks: map block start offset -> types referenced by that block
+	constBlockDeps map[int][]string
 }
 
 func newEmitter(a *analysisResult) *emitter {
@@ -53,6 +55,14 @@ func newEmitter(a *analysisResult) *emitter {
 	for tn, list := range a.constructors {
 		for _, c := range list {
 			e.ctorToTypes[c] = append(e.ctorToTypes[c], tn)
+		}
+	}
+
+	// Build const/var block dependencies from analysis constVarUsers
+	e.constBlockDeps = map[int][]string{}
+	for tn, blks := range a.constVarUsers {
+		for _, b := range blks {
+			e.constBlockDeps[b.start] = append(e.constBlockDeps[b.start], tn)
 		}
 	}
 
@@ -162,16 +172,41 @@ func (e *emitter) writeConstVar() {
 
 	e.writeNL()
 
-	for i, b := range e.a.constVar {
-		// Skip const/var blocks that are deferred to be emitted as users of a type
-		if _, deferThis := e.a.deferredConstVar[b.start]; deferThis {
-			continue
+	// Partition const/var blocks into untyped (no deps) and typed (with deps)
+	untyped := make([]block, 0, len(e.a.constVar))
+	typed := make([]block, 0, len(e.a.constVar))
+	for _, b := range e.a.constVar {
+		if _, ok := e.constBlockDeps[b.start]; ok {
+			typed = append(typed, b)
+		} else {
+			untyped = append(untyped, b)
 		}
-		if i > 0 {
+	}
+
+	outCount := 0
+	writeBlock := func(b block) {
+		if outCount > 0 {
 			e.writeNL()
 		}
-
 		e.out.Write(e.src[b.start:b.end])
+		outCount++
+	}
+
+	// Emit all unrelated const/var blocks first to keep them at the very top
+	for _, b := range untyped {
+		writeBlock(b)
+	}
+
+	// Emit typed const/var blocks; emit their required types immediately before them
+	for _, b := range typed {
+		if deps, ok := e.constBlockDeps[b.start]; ok {
+			for _, tn := range deps {
+				if tb, ok := e.a.typeDeclFor[tn]; ok && !e.isWritten(tb) {
+					e.writeDeclIfNeeded(tb)
+				}
+			}
+		}
+		writeBlock(b)
 	}
 
 	e.writeNL()

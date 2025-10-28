@@ -321,7 +321,14 @@ const (
     DamageRolled
 )
 
-// The type that must precede the above const block
+// Unrelated constants and vars should remain near the top
+const Unrelated = 42
+var GlobalX = 7
+
+// Another unrelated type to demonstrate that typed consts stay near the top
+type Other struct{}
+
+// The type that must precede the above typed const block
 type Kind int
 
 // A basic Event to satisfy Events element type (not important for ordering test)
@@ -339,20 +346,43 @@ type Summary struct{ Hit bool }
 		idxConst := findIndex(order, "const AttackRolled")
 		idxSummaryType := findIndex(order, "type Summary")
 		idxSummaryMethod := findIndex(order, "method Events.Summary")
+		idxUnrelConst := findIndex(order, "const Unrelated")
+		idxVar := findIndex(order, "var GlobalX")
+		idxOther := findIndex(order, "type Other")
 
-		need := map[string]int{"type Kind": idxKind, "const AttackRolled": idxConst, "type Summary": idxSummaryType, "method Events.Summary": idxSummaryMethod}
+		need := map[string]int{
+			"type Kind":             idxKind,
+			"const AttackRolled":    idxConst,
+			"type Summary":          idxSummaryType,
+			"method Events.Summary": idxSummaryMethod,
+			"const Unrelated":       idxUnrelConst,
+			"var GlobalX":           idxVar,
+			"type Other":            idxOther,
+		}
 		for name, idx := range need {
 			if idx == -1 {
 				t.Fatalf("missing %s in output order: %v", name, order)
 			}
 		}
 
+		// Kind must come before its typed const block
 		if !(idxKind < idxConst) {
 			t.Fatalf("type Kind should appear before its typed const block: %v", order)
 		}
 
+		// Summary type should be before Events.Summary method
 		if !(idxSummaryType < idxSummaryMethod) {
 			t.Fatalf("type Summary should appear before Events.Summary method: %v", order)
+		}
+
+		// Prefer unrelated const/var at the top, before any types (except those needed to satisfy typed consts)
+		if !(idxUnrelConst < idxKind && idxVar < idxKind) {
+			t.Fatalf("unrelated const/var should remain before types in top section: %v", order)
+		}
+
+		// The typed const block should remain near the top, not below unrelated types
+		if !(idxConst < idxOther) {
+			t.Fatalf("typed const block should remain near top, before unrelated types: %v", order)
 		}
 	})
 
