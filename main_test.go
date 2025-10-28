@@ -220,6 +220,51 @@ func A() {}
 		}
 	})
 
+	// Interface types should be treated the same as other types: the interface
+	// declaration must appear before any declarations that reference it (users),
+	// including methods on other receiver types and typed var declarations.
+	// This test asserts:
+	//   - type Service (interface) comes before var defaultSvc Service
+	//   - type Service comes before method Controller.Handle returning Service
+	t.Run("interface_type_before_users_and_vars", func(t *testing.T) {
+		src := `package p
+
+type Controller struct{}
+
+// Method using Service interface; appears before the Service type in source
+func (Controller) Handle() Service { return nil }
+
+// var typed to Service; also appears before the Service type in source
+var defaultSvc Service
+
+// Interface type that should be emitted before its users above
+type Service interface { Do() }
+`
+
+		f := writeTempFile(t, "iface_like.go", src)
+		out := runTool(t, f)
+		order := declOrder(t, out)
+
+		idxIface := findIndex(order, "type Service")
+		idxVar := findIndex(order, "var defaultSvc")
+		idxMeth := findIndex(order, "method Controller.Handle")
+
+		need := map[string]int{"type Service": idxIface, "var defaultSvc": idxVar, "method Controller.Handle": idxMeth}
+		for name, idx := range need {
+			if idx == -1 {
+				t.Fatalf("missing %s in output order: %v", name, order)
+			}
+		}
+
+		if !(idxIface < idxVar) {
+			t.Fatalf("interface type should appear before var typed to it: %v", order)
+		}
+
+		if !(idxIface < idxMeth) {
+			t.Fatalf("interface type should appear before methods that return/reference it: %v", order)
+		}
+	})
+
 	// Regression from examples/combat.go: ensure types come before their users,
 	// including (1) typed const iota block using a declared type, and (2) a method
 	// on a different receiver type that returns/mentions a declared type.
