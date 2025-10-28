@@ -153,6 +153,37 @@ func (e *emitter) build() {
 	e.writeTrailer()
 }
 
+// sortExportedFirstByOriginal returns keys ordered so exported (public) names
+// come before private ones, and within each partition items are ordered by
+// original byte offset. Exportedness is determined by the first rune of the
+// function name (for methods, the name after the dot).
+func sortExportedFirstByOriginal(keys []string, funcByKey map[string]funcBlock) []string {
+	out := append([]string(nil), keys...)
+
+	isExported := func(k string) bool {
+		name := k
+		// For methods, key format is "Recv.Name"; extract method name
+		if dot := indexByte(name, '.'); dot >= 0 {
+			name = name[dot+1:]
+		}
+		if name == "" {
+			return false
+		}
+		r := name[0]
+		return r >= 'A' && r <= 'Z'
+	}
+
+	sort.SliceStable(out, func(i, j int) bool {
+		ei, ej := isExported(out[i]), isExported(out[j])
+		if ei != ej {
+			return ei && !ej // exported first
+		}
+		return funcByKey[out[i]].start < funcByKey[out[j]].start
+	})
+
+	return out
+}
+
 func (e *emitter) writeHeader() {
 	headerEnd := 0
 	if e.a.lastImportEnd != -1 {
@@ -1050,37 +1081,6 @@ func buildOutput(a *analysisResult) []byte {
 	e.build()
 
 	return e.out.Bytes()
-}
-
-// sortExportedFirstByOriginal returns keys ordered so exported (public) names
-// come before private ones, and within each partition items are ordered by
-// original byte offset. Exportedness is determined by the first rune of the
-// function name (for methods, the name after the dot).
-func sortExportedFirstByOriginal(keys []string, funcByKey map[string]funcBlock) []string {
-	out := append([]string(nil), keys...)
-
-	isExported := func(k string) bool {
-		name := k
-		// For methods, key format is "Recv.Name"; extract method name
-		if dot := indexByte(name, '.'); dot >= 0 {
-			name = name[dot+1:]
-		}
-		if name == "" {
-			return false
-		}
-		r := name[0]
-		return r >= 'A' && r <= 'Z'
-	}
-
-	sort.SliceStable(out, func(i, j int) bool {
-		ei, ej := isExported(out[i]), isExported(out[j])
-		if ei != ej {
-			return ei && !ej // exported first
-		}
-		return funcByKey[out[i]].start < funcByKey[out[j]].start
-	})
-
-	return out
 }
 
 // indexByte is a tiny helper to avoid importing strings for a single use.
