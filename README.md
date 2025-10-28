@@ -23,6 +23,11 @@ High-level emission order
   treated as users of that type and are emitted with that type’s users instead
   of in the global const/var section. This enforces the precedence that types
   come before their users.
+  - Additionally, when a `var` initialiser references constants declared in the
+    same file (e.g., `var DirectionsURDL = [...]Dir{Up, Right, Down, Left}`),
+    the constant block that defines those identifiers is emitted before that
+    variable, even if the original source placed the `var` above the `const`.
+    This keeps users of constants beneath the constants they use.
 - "Independent" free functions (non-methods that have no calls to or from
   other functions in the file and are not constructors named `New*`) are
   emitted next in their original order.

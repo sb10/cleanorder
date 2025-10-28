@@ -14,10 +14,12 @@ type callFirstPosMap map[string]map[string]int
 // analysisResult aggregates all information derived from parsing needed for
 // subsequent ordering & emission phases.
 type analysisResult struct {
-	fset           *token.FileSet
-	src            []byte
-	file           *ast.File
-	constVar       []block
+	fset     *token.FileSet
+	src      []byte
+	file     *ast.File
+	constVar []block
+	// Detailed info for each const/var block to support dependency-aware ordering
+	constVarInfos  []constVarInfo
 	typeBlocks     []block
 	typeNames      []string
 	typeDeclFor    map[string]block
@@ -54,6 +56,7 @@ func newAnalysisResult(fset *token.FileSet, src []byte, file *ast.File) *analysi
 		src:              src,
 		file:             file,
 		constVar:         []block{},
+		constVarInfos:    []constVarInfo{},
 		typeBlocks:       []block{},
 		typeNames:        []string{},
 		typeDeclFor:      map[string]block{},
@@ -186,7 +189,30 @@ func (res *analysisResult) recordGenDecl(gd *ast.GenDecl, s, e int) {
 			res.lastImportEnd = e
 		}
 	case token.CONST, token.VAR:
-		res.constVar = append(res.constVar, block{s, e})
+		b := block{s, e}
+		res.constVar = append(res.constVar, b)
+		// Build defines/uses sets for this const/var block to allow ordering vars
+		// after the consts they reference.
+		info := constVarInfo{blk: b, tok: gd.Tok, defines: map[string]struct{}{}, usesIdents: map[string]struct{}{}}
+		for _, sp := range gd.Specs {
+			vs, ok := sp.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			// defined names
+			for _, n := range vs.Names {
+				info.defines[n.Name] = struct{}{}
+			}
+			// explicit type identifiers used (e.g., typed const/var)
+			if vs.Type != nil {
+				collectIdentsInType(vs.Type, info.usesIdents)
+			}
+			// expressions on RHS may reference identifiers (e.g., constants)
+			for _, val := range vs.Values {
+				collectIdentsInExpr(val, info.usesIdents)
+			}
+		}
+		res.constVarInfos = append(res.constVarInfos, info)
 	case token.TYPE:
 		res.typeBlocks = append(res.typeBlocks, block{s, e})
 
@@ -448,12 +474,21 @@ func (res *analysisResult) computeConstVarUsers(typeSet map[string]struct{}) {
 			if !ok {
 				continue
 			}
-			if vs.Type == nil {
-				continue // only handle explicitly-typed specs
+			// Check explicit type for mentions of declared types
+			if vs.Type != nil {
+				for tn := range typeSet {
+					if typeContains(vs.Type, tn) {
+						referenced[tn] = struct{}{}
+					}
+				}
 			}
-			for tn := range typeSet {
-				if typeContains(vs.Type, tn) {
-					referenced[tn] = struct{}{}
+			// Also check value expressions for composite literal types or
+			// conversions that reference declared types (e.g., [...]T{...}).
+			for _, val := range vs.Values {
+				for tn := range typeSet {
+					if exprContainsType(val, tn) {
+						referenced[tn] = struct{}{}
+					}
 				}
 			}
 		}
@@ -469,6 +504,162 @@ func (res *analysisResult) computeConstVarUsers(typeSet map[string]struct{}) {
 		for tn := range referenced {
 			res.constVarUsers[tn] = append(res.constVarUsers[tn], b)
 		}
+	}
+}
+
+// constVarInfo describes a const/var declaration block: its token kind,
+// the identifiers it defines, and the identifiers referenced in its type/value
+// expressions. This supports ordering a var block after the const block that
+// defines the constants it uses.
+type constVarInfo struct {
+	blk        block
+	tok        token.Token
+	defines    map[string]struct{}
+	usesIdents map[string]struct{}
+}
+
+// collectIdentsInType walks a type expression and records identifier names.
+func collectIdentsInType(t ast.Expr, into map[string]struct{}) {
+	if t == nil {
+		return
+	}
+	// Reuse typeContains-like traversal but record all idents encountered
+	switch tt := t.(type) {
+	case *ast.Ident:
+		into[tt.Name] = struct{}{}
+	case *ast.StarExpr:
+		collectIdentsInType(tt.X, into)
+	case *ast.ArrayType:
+		collectIdentsInType(tt.Elt, into)
+	case *ast.MapType:
+		collectIdentsInType(tt.Key, into)
+		collectIdentsInType(tt.Value, into)
+	case *ast.SelectorExpr:
+		if tt.Sel != nil {
+			into[tt.Sel.Name] = struct{}{}
+		}
+	case *ast.StructType:
+		if tt.Fields != nil {
+			for _, f := range tt.Fields.List {
+				collectIdentsInType(f.Type, into)
+			}
+		}
+	case *ast.InterfaceType:
+		if tt.Methods != nil {
+			for _, f := range tt.Methods.List {
+				collectIdentsInType(f.Type, into)
+			}
+		}
+	case *ast.FuncType:
+		if tt.Params != nil {
+			for _, f := range tt.Params.List {
+				collectIdentsInType(f.Type, into)
+			}
+		}
+		if tt.Results != nil {
+			for _, f := range tt.Results.List {
+				collectIdentsInType(f.Type, into)
+			}
+		}
+	}
+}
+
+// collectIdentsInExpr walks an expression and records identifier names used.
+func collectIdentsInExpr(e ast.Expr, into map[string]struct{}) {
+	if e == nil {
+		return
+	}
+	switch ex := e.(type) {
+	case *ast.Ident:
+		into[ex.Name] = struct{}{}
+	case *ast.BasicLit:
+		// no identifiers
+	case *ast.CompositeLit:
+		// record identifiers in the type and in element expressions
+		collectIdentsInType(ex.Type, into)
+		for _, elt := range ex.Elts {
+			collectIdentsInExpr(elt, into)
+		}
+	case *ast.CallExpr:
+		// the function may be a type name (conversion); record ident if present
+		switch fn := ex.Fun.(type) {
+		case *ast.Ident:
+			into[fn.Name] = struct{}{}
+		case *ast.SelectorExpr:
+			if fn.Sel != nil {
+				into[fn.Sel.Name] = struct{}{}
+			}
+		}
+		for _, arg := range ex.Args {
+			collectIdentsInExpr(arg, into)
+		}
+	case *ast.UnaryExpr:
+		collectIdentsInExpr(ex.X, into)
+	case *ast.BinaryExpr:
+		collectIdentsInExpr(ex.X, into)
+		collectIdentsInExpr(ex.Y, into)
+	case *ast.KeyValueExpr:
+		collectIdentsInExpr(ex.Key, into)
+		collectIdentsInExpr(ex.Value, into)
+	case *ast.ParenExpr:
+		collectIdentsInExpr(ex.X, into)
+	case *ast.IndexExpr:
+		collectIdentsInExpr(ex.X, into)
+		collectIdentsInExpr(ex.Index, into)
+	case *ast.SliceExpr:
+		collectIdentsInExpr(ex.X, into)
+		collectIdentsInExpr(ex.Low, into)
+		collectIdentsInExpr(ex.High, into)
+		collectIdentsInExpr(ex.Max, into)
+	case *ast.SelectorExpr:
+		if ex.Sel != nil {
+			into[ex.Sel.Name] = struct{}{}
+		}
+	}
+}
+
+// exprContainsType reports whether an expression syntactically mentions the
+// given type identifier name (e.g., in a composite literal or conversion).
+func exprContainsType(e ast.Expr, typeName string) bool {
+	if e == nil {
+		return false
+	}
+	switch ex := e.(type) {
+	case *ast.CompositeLit:
+		if ex.Type != nil && typeContains(ex.Type, typeName) {
+			return true
+		}
+		for _, elt := range ex.Elts {
+			if exprContainsType(elt, typeName) {
+				return true
+			}
+		}
+		return false
+	case *ast.CallExpr:
+		// conversion like T(x)
+		if id, ok := ex.Fun.(*ast.Ident); ok && id.Name == typeName {
+			return true
+		}
+		for _, arg := range ex.Args {
+			if exprContainsType(arg, typeName) {
+				return true
+			}
+		}
+		return false
+	case *ast.IndexExpr:
+		return exprContainsType(ex.X, typeName) || exprContainsType(ex.Index, typeName)
+	case *ast.SliceExpr:
+		return exprContainsType(ex.X, typeName) || exprContainsType(ex.Low, typeName) || exprContainsType(ex.High, typeName) || exprContainsType(ex.Max, typeName)
+	case *ast.ParenExpr:
+		return exprContainsType(ex.X, typeName)
+	case *ast.UnaryExpr:
+		return exprContainsType(ex.X, typeName)
+	case *ast.BinaryExpr:
+		return exprContainsType(ex.X, typeName) || exprContainsType(ex.Y, typeName)
+	case *ast.KeyValueExpr:
+		return exprContainsType(ex.Key, typeName) || exprContainsType(ex.Value, typeName)
+	default:
+		return false
 	}
 }
 

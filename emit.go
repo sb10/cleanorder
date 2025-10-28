@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"go/token"
 	"sort"
 )
 
@@ -172,19 +173,124 @@ func (e *emitter) writeConstVar() {
 
 	e.writeNL()
 
-	// Partition const/var blocks into untyped (no deps) and typed (with deps)
-	untyped := make([]block, 0, len(e.a.constVar))
-	typed := make([]block, 0, len(e.a.constVar))
-	for _, b := range e.a.constVar {
-		if _, ok := e.constBlockDeps[b.start]; ok {
-			typed = append(typed, b)
-		} else {
-			untyped = append(untyped, b)
+	// Helper to order a subset of const/var blocks by const-usage dependencies
+	orderSubset := func(infos []constVarInfo, idxs []int) []int {
+		if len(idxs) <= 1 {
+			return append([]int(nil), idxs...)
+		}
+		n := len(idxs)
+		pos := make(map[int]int, n)
+		for i, id := range idxs {
+			pos[id] = i
+		}
+		indeg := make([]int, n)
+		adj := make([][]int, n)
+		for i := range adj {
+			adj[i] = []int{}
+		}
+		// map original index within subset to its defines if it's a const block
+		defines := make([]map[string]struct{}, n)
+		for i, id := range idxs {
+			if infos[id].tok == token.CONST {
+				defines[i] = infos[id].defines
+			} else {
+				defines[i] = map[string]struct{}{}
+			}
+		}
+		// Build edges: for each var in subset, add edges from consts in subset that it uses
+		for i, id := range idxs {
+			if infos[id].tok != token.VAR {
+				continue
+			}
+			for ci, cdefs := range defines {
+				if len(cdefs) == 0 {
+					continue
+				}
+				// quick intersection
+				used := infos[id].usesIdents
+				dep := false
+				for name := range used {
+					if _, ok := cdefs[name]; ok {
+						dep = true
+						break
+					}
+				}
+				if dep {
+					adj[ci] = append(adj[ci], i)
+					indeg[i]++
+				}
+			}
+		}
+		// Kahn's algorithm with stability based on original position within subset
+		ready := make([]int, 0, n)
+		for i := 0; i < n; i++ {
+			if indeg[i] == 0 {
+				ready = append(ready, i)
+			}
+		}
+		sort.Ints(ready)
+		orderedLocal := make([]int, 0, n)
+		for len(ready) > 0 {
+			i := ready[0]
+			ready = ready[1:]
+			orderedLocal = append(orderedLocal, idxs[i])
+			for _, nb := range adj[i] {
+				indeg[nb]--
+				if indeg[nb] == 0 {
+					// insert nb keeping ready sorted
+					insertPos := sort.SearchInts(ready, nb)
+					if insertPos == len(ready) || ready[insertPos] != nb {
+						ready = append(ready, 0)
+						copy(ready[insertPos+1:], ready[insertPos:])
+						ready[insertPos] = nb
+					}
+				}
+			}
+		}
+		if len(orderedLocal) != n {
+			return append([]int(nil), idxs...)
+		}
+		return orderedLocal
+	}
+
+	infos := e.a.constVarInfos
+	// Partition into untyped and typed groups (typed have recorded type deps)
+	untypedIdx := []int{}
+	typedIdx := []int{}
+	if len(infos) == len(e.a.constVar) && len(infos) > 0 {
+		for i, inf := range infos {
+			if _, ok := e.constBlockDeps[inf.blk.start]; ok {
+				typedIdx = append(typedIdx, i)
+			} else {
+				untypedIdx = append(untypedIdx, i)
+			}
+		}
+	} else {
+		// Fallback: no detailed infos
+		for i := range e.a.constVar {
+			if _, ok := e.constBlockDeps[e.a.constVar[i].start]; ok {
+				typedIdx = append(typedIdx, i)
+			} else {
+				untypedIdx = append(untypedIdx, i)
+			}
 		}
 	}
 
+	// Order each group independently with const-usage constraints
+	if len(infos) == len(e.a.constVar) && len(infos) > 0 {
+		untypedIdx = orderSubset(infos, untypedIdx)
+		typedIdx = orderSubset(infos, typedIdx)
+	}
+
 	outCount := 0
-	writeBlock := func(b block) {
+	// Emit all untyped blocks first to keep unrelated consts/vars at the very top
+	for _, id := range untypedIdx {
+		var b block
+		if len(infos) == len(e.a.constVar) && len(infos) > 0 {
+			b = infos[id].blk
+		} else {
+			b = e.a.constVar[id]
+		}
 		if outCount > 0 {
 			e.writeNL()
 		}
@@ -193,31 +299,29 @@ func (e *emitter) writeConstVar() {
 		outCount++
 	}
 
-	// Emit all unrelated const/var blocks first to keep them at the very top
-	for _, b := range untyped {
-		writeBlock(b)
-	}
-
-	// Emit typed const/var blocks; emit their required types immediately before them
-	for _, b := range typed {
+	// Then emit typed blocks; inject required type declarations immediately before each
+	for _, id := range typedIdx {
+		var b block
+		if len(infos) == len(e.a.constVar) && len(infos) > 0 {
+			b = infos[id].blk
+		} else {
+			b = e.a.constVar[id]
+		}
+		emittedType := false
 		if deps, ok := e.constBlockDeps[b.start]; ok {
 			for _, tn := range deps {
 				if tb, ok := e.a.typeDeclFor[tn]; ok && !e.isWritten(tb) {
 					e.writeDeclIfNeeded(tb)
+					emittedType = true
 				}
 			}
 		}
-
-		// Ensure a separator before the typed const/var block when it follows a
-		// freshly-emitted type declaration. The writeBlock helper only inserts a
-		// separator when at least one prior const/var block has been written via
-		// this function (outCount>0). When we just emitted a type above and this
-		// is the first const/var block, we need to explicitly ensure separation to
-		// avoid gluing tokens like "type T intconst (".
-		if outCount == 0 {
+		if outCount > 0 || emittedType {
 			e.writeNL()
 		}
-		writeBlock(b)
+		e.out.Write(e.src[b.start:b.end])
+		e.markWritten(b)
+		outCount++
 	}
 
 	e.writeNL()

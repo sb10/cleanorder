@@ -733,6 +733,45 @@ func independent2() {}
 		}
 	})
 
+	// Bug report regression: In examples/dir.go, the variable DirectionsURDL
+	// (which uses the Up/Right/Down/Left constants) appeared above the const
+	// block that defines those constants. As a user of the consts, it should be
+	// emitted beneath them.
+	t.Run("dir_var_below_consts", func(t *testing.T) {
+		src := `package model
+
+// DirectionsURDL is the canonical neighbor iteration order used by rules that
+// need 4-connected movement on a grid: Up, Right, Down, Left. Using a shared
+// definition keeps pathfinding and other systems deterministic.
+var DirectionsURDL = [...]Dir{Up, Right, Down, Left}
+
+const (
+	Up Dir = iota
+	Right
+	Down
+	Left
+)
+
+// Dir represents a cardinal direction.
+type Dir int
+`
+
+		f := writeTempFile(t, "dir_bug.go", src)
+		out := runTool(t, f)
+		order := declOrder(t, out)
+
+		idxVar := findIndex(order, "var DirectionsURDL")
+		idxConst := findIndex(order, "const Up")
+
+		if idxVar == -1 || idxConst == -1 {
+			t.Fatalf("missing DirectionsURDL var or Up const in output order: %v", order)
+		}
+
+		if !(idxConst < idxVar) {
+			t.Fatalf("DirectionsURDL var should appear after its composing consts: %v", order)
+		}
+	})
+
 	t.Run("constructor_methods_helpers_and_users", func(t *testing.T) {
 		// scrambled but valid order: helper and user appear before the type
 		// and constructor; the tool should cluster them and emit type,
