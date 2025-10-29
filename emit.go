@@ -340,6 +340,20 @@ func (e *emitter) writeConstVar() {
 		}
 		emittedType := false
 		if deps, ok := e.constBlockDeps[b.start]; ok {
+			// emit dependency types in deterministic order by original position
+			if len(deps) > 1 {
+				sort.SliceStable(deps, func(i, j int) bool {
+					bi, bok := e.a.typeDeclFor[deps[i]]
+					bj, bjok := e.a.typeDeclFor[deps[j]]
+					if !bok || !bjok {
+						return deps[i] < deps[j]
+					}
+					if bi.start != bj.start {
+						return bi.start < bj.start
+					}
+					return deps[i] < deps[j]
+				})
+			}
 			for _, tn := range deps {
 				if tb, ok := e.a.typeDeclFor[tn]; ok && !e.isWritten(tb) {
 					e.writeDeclIfNeeded(tb)
@@ -516,7 +530,15 @@ func (e *emitter) writeRemainingComponents() {
 		}
 	}
 
-	for key := range remainingSet {
+	// Process components in a deterministic order by picking start keys
+	// sorted by exported-first and original position.
+	startKeys := make([]string, 0, len(remainingSet))
+	for k := range remainingSet {
+		startKeys = append(startKeys, k)
+	}
+	startKeys = sortExportedFirstByOriginal(startKeys, e.funcByKey)
+
+	for _, key := range startKeys {
 		if _, ok := remainingSet[key]; !ok {
 			continue
 		}
@@ -798,11 +820,27 @@ func (e *emitter) writeUsersForType(tn string) {
 		// If this user is a method and references an incidental type, ensure
 		// that type is emitted immediately before the method (kept adjacent).
 		if fb, ok := e.funcByKey[k]; ok && fb.isMethod {
+			// Collect incidental types referenced by this user and emit them
+			// in deterministic order by their original declaration position.
+			incList := make([]string, 0, len(e.a.incidentalTypes))
 			for inc := range e.a.incidentalTypes {
 				if _, ok := e.users[inc][k]; ok {
-					if b, ok := e.a.typeDeclFor[inc]; ok && !e.isWritten(b) {
-						e.writeDeclIfNeeded(b)
+					incList = append(incList, inc)
+				}
+			}
+			if len(incList) > 1 {
+				sort.SliceStable(incList, func(i, j int) bool {
+					bi := e.a.typeDeclFor[incList[i]]
+					bj := e.a.typeDeclFor[incList[j]]
+					if bi.start != bj.start {
+						return bi.start < bj.start
 					}
+					return incList[i] < incList[j]
+				})
+			}
+			for _, inc := range incList {
+				if b, ok := e.a.typeDeclFor[inc]; ok && !e.isWritten(b) {
+					e.writeDeclIfNeeded(b)
 				}
 			}
 		}

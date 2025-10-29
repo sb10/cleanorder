@@ -139,6 +139,13 @@ Tie-breakers
   file order is preserved. This applies across independent functions, call-graph
   components, and type users.
 
+- Deterministic across runs: any remaining unordered sets (for example,
+  disconnected call-graph components, incidental types injected immediately
+  before a user, or types injected to satisfy typed const/var dependencies)
+  are processed in a stable, deterministic order (exported-first, then original
+  source position). This avoids spurious diffs where repeated runs would
+  otherwise produce different but equally valid orders.
+
 Limitations (brief)
 
 - Analysis is file-local: it recognizes calls by identifier/selector name but

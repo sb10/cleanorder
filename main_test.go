@@ -220,6 +220,68 @@ func A() {}
 		}
 	})
 
+	// Determinism bug: examples/catalog.go produced different orders on
+	// repeated runs due to nondeterministic component traversal. This test
+	// copies relevant snippets from that example (Enemies/RandomEnemy and
+	// simple name helpers) to ensure the tool's output is identical across
+	// multiple runs.
+	// We intentionally create multiple disconnected components to exercise the
+	// component emission phase.
+	Run := func(t *testing.T) {
+		src := `package p
+
+// Minimal copy of example/catalog.go parts to trigger multiple components
+const RoleEnemy = "enemy"
+
+type ActorDef struct{ Role string }
+
+var actors map[string]ActorDef
+
+// RandIntn is copied from the example to keep function signatures identical.
+type RandIntn interface{ Intn(n int) int }
+
+// Enemies returns all actors with enemy role.
+func Enemies() []ActorDef {
+    out := make([]ActorDef, 0, len(actors))
+    for _, a := range actors { // map iteration order is intentionally nondeterministic
+        if a.Role != RoleEnemy {
+            continue
+        }
+        out = append(out, a)
+    }
+    return out
+}
+
+// RandomEnemy calls Enemies and returns a random element.
+func RandomEnemy(r RandIntn) (ActorDef, bool) {
+    es := Enemies()
+    if len(es) == 0 { return ActorDef{}, false }
+    return es[r.Intn(len(es))], true
+}
+
+// Independent helpers (modeled on WeaponName/ArmorName) to form separate components.
+func WeaponName(id string) string { return "Unknown Weapon" }
+func ArmorName(id string) string { return "Unknown Armor" }
+`
+
+		f := writeTempFile(t, "catalog_like.go", src)
+
+		// Run the tool multiple times and ensure output is identical.
+		const runs = 8
+		seen := map[string]int{}
+		for i := 0; i < runs; i++ {
+			out := runTool(t, f)
+			seen[string(out)]++
+		}
+
+		if len(seen) != 1 { // nondeterministic outputs observed
+			// keep error message compact to avoid dumping all variants
+			t.Fatalf("nondeterministic output across runs: got %d unique outputs", len(seen))
+		}
+	}
+
+	t.Run("deterministic_output_for_catalog_like", Run)
+
 	// Bug report reproducer: a type used by another type's declaration must be
 	// declared before its user. In examples/monster_phase.go, MonsterOutcome has a
 	// field of type []AttackDetail, but AttackDetail was declared below it. The
