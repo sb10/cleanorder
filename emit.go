@@ -392,9 +392,23 @@ func (e *emitter) emitTypeWithDeps(tn string, visited map[string]bool) {
 		return
 	}
 
-	// Emit dependency types first
-	for dep := range e.typeDeps(tn) {
-		e.emitTypeWithDeps(dep, visited)
+	// Emit dependency types first, in a deterministic order by original position
+	if depsMap := e.typeDeps(tn); len(depsMap) > 0 {
+		deps := make([]string, 0, len(depsMap))
+		for d := range depsMap {
+			deps = append(deps, d)
+		}
+		sort.SliceStable(deps, func(i, j int) bool {
+			bi := e.a.typeDeclFor[deps[i]]
+			bj := e.a.typeDeclFor[deps[j]]
+			if bi.start != bj.start {
+				return bi.start < bj.start
+			}
+			return deps[i] < deps[j]
+		})
+		for _, dep := range deps {
+			e.emitTypeWithDeps(dep, visited)
+		}
 	}
 
 	b, ok := e.a.typeDeclFor[tn]
@@ -917,11 +931,26 @@ func (e *emitter) writeRemainingFuncs() {
 		}
 
 		// Inline incidental type declaration immediately before first user
+		// Collect incidental types for this user and emit them in stable order
+		incList := make([]string, 0)
 		for inc := range e.a.incidentalTypes {
 			if _, ok := e.users[inc][fb.key]; ok {
-				if b, ok := e.a.typeDeclFor[inc]; ok && !e.isWritten(b) {
-					e.writeDeclIfNeeded(b)
+				incList = append(incList, inc)
+			}
+		}
+		if len(incList) > 1 {
+			sort.SliceStable(incList, func(i, j int) bool {
+				bi := e.a.typeDeclFor[incList[i]]
+				bj := e.a.typeDeclFor[incList[j]]
+				if bi.start != bj.start {
+					return bi.start < bj.start
 				}
+				return incList[i] < incList[j]
+			})
+		}
+		for _, inc := range incList {
+			if b, ok := e.a.typeDeclFor[inc]; ok && !e.isWritten(b) {
+				e.writeDeclIfNeeded(b)
 			}
 		}
 		e.writeFuncIfNotWritten(fb.key)
